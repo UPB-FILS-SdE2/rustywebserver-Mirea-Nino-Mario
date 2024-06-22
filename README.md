@@ -12,7 +12,6 @@ Gestionarea cererilor HTTP asincrone.
 Proiectul utilizează biblioteca tokio pentru suport asincron. În Cargo.toml:
 
 toml
-Copiază codul
 ```
 [dependencies]
 tokio = { version = "1", features = ["full"] }
