@@ -2,7 +2,6 @@ use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::env;
 use std::path::{Path, PathBuf};
-use tokio::fs;
 use tokio::process::Command;
 use std::os::unix::fs::PermissionsExt;
 use std::str;
@@ -22,7 +21,6 @@ async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf, 
                 let method = parts[0];
                 let path = parts[1];
 
-                // Verificare autentificare
                 let mut authenticated = false;
                 for line in &mut lines {
                     if line.starts_with("Authorization: Basic ") {
@@ -130,7 +128,6 @@ async fn handle_post_request(path: &Path, headers: &[&str]) -> String {
     }
 }
 
-// Implementare manuală a decodării base64
 fn base64_decode(encoded: &str) -> Result<Vec<u8>, ()> {
     let bytes = encoded.as_bytes();
     let mut buffer = Vec::new();
