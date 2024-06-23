@@ -204,36 +204,6 @@ async fn handle_post_request(root_folder: &Path, path: &str, headers: &[&str]) -
 }
 
 
-fn base64_decode(encoded: &str) -> Result<Vec<u8>, ()> {
-    let bytes = encoded.as_bytes();
-    let mut buffer = Vec::new();
-    let mut value = 0;
-    let mut bits = 0;
-    for &byte in bytes {
-        let digit = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' => {
-                value <<= 6;
-                bits += 6;
-                continue;
-            }
-            _ => return Err(()),
-        };
-        value = (value << 6) | (digit as u32);
-        bits += 6;
-        if bits >= 8 {
-            buffer.push((value >> (bits - 8)) as u8);
-            bits -= 8;
-        }
-    }
-    Ok(buffer)
-}
-
-
 fn guess_mime_type<P: AsRef<Path>>(path: P) -> &'static str {
     match path.as_ref().extension().and_then(|ext| ext.to_str()) {
         Some("html") => "text/html; charset=utf-8",
