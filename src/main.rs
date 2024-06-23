@@ -83,45 +83,54 @@ async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf) 
 
 async fn handle_get_request(root_folder: &Path, path: &str) -> String {
     let full_path = root_folder.join(path.trim_start_matches('/'));
-    
-    if let Ok(file_metadata) = tokio::fs::metadata(&full_path).await {
-        if file_metadata.is_file() {
-            match tokio::fs::read(&full_path).await {
-                Ok(contents) => {
-                    let mime_type = guess_mime_type(&full_path);
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        mime_type,
-                        contents.len(),
-                        String::from_utf8_lossy(&contents)
-                    )
+
+    match tokio::fs::metadata(&full_path).await {
+        Ok(file_metadata) => {
+            if file_metadata.is_file() {
+                match tokio::fs::read(&full_path).await {
+                    Ok(contents) => {
+                        let mime_type = guess_mime_type(&full_path);
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            mime_type,
+                            contents.len(),
+                            String::from_utf8_lossy(&contents)
+                        )
+                    }
+                    Err(_) => {
+                        "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string()
+                    }
                 }
-                Err(_) => "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string(),
+            } else if file_metadata.is_dir() {
+                match tokio::fs::read_dir(&full_path).await {
+                    Ok(mut entries) => {
+                        let mut body = String::new();
+                        body.push_str("<html><h1>Directory Listing</h1><ul>");
+                        while let Some(entry) = entries.next_entry().await.unwrap_or_else(|_| None) {
+                            let name = entry.file_name().into_string().unwrap_or_default();
+                            body.push_str(&format!("<li><a href=\"/{0}\">{0}</a></li>", name));
+                        }
+                        body.push_str("</ul></html>");
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    }
+                    Err(_) => {
+                        "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string()
+                    }
+                }
+            } else {
+                "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404 Not Found".to_string()
             }
-        } else if file_metadata.is_dir() {
-            let mut entries = match tokio::fs::read_dir(&full_path).await {
-                Ok(entries) => entries,
-                Err(_) => return "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string(),
-            };
-            let mut body = String::new();
-            body.push_str("<html><h1>Directory Listing</h1><ul>");
-            while let Some(entry) = entries.next_entry().await.unwrap_or_else(|_| None) {
-                let name = entry.file_name().into_string().unwrap_or_default();
-                body.push_str(&format!("<li><a href=\"/{0}\">{0}</a></li>", name));
-            }
-            body.push_str("</ul></html>");
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-        } else {
+        }
+        Err(_) => {
             "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404 Not Found".to_string()
         }
-    } else {
-        "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404 Not Found".to_string()
     }
 }
+
 
 
 async fn handle_post_subsets_request(_socket: &mut tokio::net::TcpStream, headers: &[&str]) -> String {
