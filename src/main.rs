@@ -225,6 +225,7 @@ async fn main() {
     println!("Server listening on 0.0.0.0:{}", port);
 
     let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
+    println!("Server started on 0.0.0.0:{}", port);
 
     loop {
         let (socket, _) = listener.accept().await.unwrap();
