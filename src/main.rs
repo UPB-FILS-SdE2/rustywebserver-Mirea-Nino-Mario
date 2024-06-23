@@ -87,8 +87,6 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
     let root_path = PathBuf::from(root);
     let requested_path = root_path.join(path.trim_start_matches('/'));
     
-    println!("Requested path: {:?}", requested_path); // Debug print
-
     // Check if the requested path is within the root directory
     if !requested_path.starts_with(&root_path) {
         log_request(client_ip, path, 403, "Forbidden");
