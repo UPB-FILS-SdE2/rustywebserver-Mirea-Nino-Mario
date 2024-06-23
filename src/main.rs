@@ -25,7 +25,7 @@ async fn main() {
 
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(listener) => {
-            println!("server listening on {}", port);
+            println!("Server listening on 0.0.0.0:{}", port);
             listener
         }
         Err(e) => {
@@ -268,4 +268,3 @@ fn parse_json(body: &str) -> Result<HashMap<String, String>, ()> {
         Err(())
     }
 }
-
