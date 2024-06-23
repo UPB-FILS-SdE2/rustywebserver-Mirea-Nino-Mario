@@ -211,15 +211,15 @@ fn guess_mime_type(path: &Path) -> &'static str {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 5 {
-        eprintln!("Usage: {} PORT ROOT_FOLDER USERNAME PASSWORD", args[0]);
+    if args.len() != 4 {
+        eprintln!("Usage: {} ROOT_FOLDER USERNAME PASSWORD", args[0]);
         return;
     }
 
-    let port: u16 = args[1].parse().expect("Invalid port number");
-    let root_folder = PathBuf::from(&args[2]);
-    let username = args[3].clone();
-    let password = args[4].clone();
+    let port: u16 = 8000;
+    let root_folder = PathBuf::from(&args[1]);
+    let username = args[2].clone();
+    let password = args[3].clone();
 
     println!("Root folder: {:?}", root_folder.canonicalize().unwrap());
     println!("Server listening on 0.0.0.0:{}", port);
