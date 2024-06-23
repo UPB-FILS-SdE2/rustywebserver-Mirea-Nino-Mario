@@ -37,7 +37,7 @@ async fn main() {
     loop {
         match listener.accept().await {
             Ok((socket, _)) => {
-                println!("server listening on {}", port);
+                println!("Server listening on 0.0.0.0.{}", port);
                 let root_folder = root_folder.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(socket, root_folder).await {
