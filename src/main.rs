@@ -87,42 +87,30 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
     let root_path = PathBuf::from(root);
     let requested_path = root_path.join(path.trim_start_matches('/'));
     
-    // Normalize the path to resolve any '..' components
-    let canonical_path = match fs::canonicalize(&requested_path).await {
-        Ok(p) => p,
-        Err(_) => {
-            log_request(client_ip, path, 404, "Not Found");
-            send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
-            return Ok(());
-        }
-    };
+    println!("Requested path: {:?}", requested_path); // Debug print
 
-    // Check if the canonical path is within the root directory
-    if !canonical_path.starts_with(&root_path) {
+    // Check if the requested path is within the root directory
+    if !requested_path.starts_with(&root_path) {
         log_request(client_ip, path, 403, "Forbidden");
         send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
         return Ok(());
     }
 
-    match fs::metadata(&canonical_path).await {
+    match fs::metadata(&requested_path).await {
         Ok(metadata) => {
             if metadata.is_dir() {
-                handle_directory_listing(stream, &canonical_path, path, client_ip).await?;
+                handle_directory_listing(stream, &requested_path, path, client_ip).await?;
             } else if metadata.is_file() {
-                match fs::read(&canonical_path).await {
+                match fs::read(&requested_path).await {
                     Ok(content) => {
-                        let content_type = get_content_type(&canonical_path);
+                        let content_type = get_content_type(&requested_path);
                         log_request(client_ip, path, 200, "OK");
                         send_binary_response(stream, 200, "OK", &content_type, &content).await?;
                     },
                     Err(e) => {
-                        if e.kind() == std::io::ErrorKind::PermissionDenied {
-                            log_request(client_ip, path, 403, "Forbidden");
-                            send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
-                        } else {
-                            log_request(client_ip, path, 404, "Not Found");
-                            send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
-                        }
+                        eprintln!("Error reading file: {:?}", e); // Debug print
+                        log_request(client_ip, path, 403, "Forbidden");
+                        send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
                     }
                 }
             } else {
@@ -131,13 +119,9 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
             }
         },
         Err(e) => {
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                log_request(client_ip, path, 403, "Forbidden");
-                send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
-            } else {
-                log_request(client_ip, path, 404, "Not Found");
-                send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
-            }
+            eprintln!("Error getting metadata: {:?}", e); // Debug print
+            log_request(client_ip, path, 404, "Not Found");
+            send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
         }
     }
 
