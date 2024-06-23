@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use std::os::unix::fs::PermissionsExt;
 use std::str;
+use std::collections::HashMap;
 
 async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf, valid_user: &str, valid_pass: &str) {
     let mut buffer = vec![0; 1024];
@@ -45,12 +46,12 @@ async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf, 
                     return;
                 }
 
-                let full_path = root_folder.join(path.trim_start_matches('/'));
-
                 let response = if method == "GET" {
-                    handle_get_request(&full_path).await
+                    handle_get_request(&root_folder, path).await
+                } else if method == "POST" && path == "/subsets" {
+                    handle_post_subsets_request(&mut socket, &mut lines.collect::<Vec<&str>>()).await
                 } else {
-                    handle_post_request(&full_path, &mut lines.collect::<Vec<&str>>()).await
+                    handle_post_request(&root_folder, path, &mut lines.collect::<Vec<&str>>()).await
                 };
 
                 socket.write_all(response.as_bytes()).await.unwrap();
@@ -59,11 +60,12 @@ async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf, 
     }
 }
 
-async fn handle_get_request(path: &Path) -> String {
-    if path.is_file() {
-        match tokio::fs::read(path).await {
+async fn handle_get_request(root_folder: &Path, path: &str) -> String {
+    let full_path = root_folder.join(path.trim_start_matches('/'));
+    if full_path.is_file() {
+        match tokio::fs::read(&full_path).await {
             Ok(contents) => {
-                let mime_type = guess_mime_type(path);
+                let mime_type = guess_mime_type(&full_path);
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\r\n{}",
                     mime_type,
@@ -72,8 +74,8 @@ async fn handle_get_request(path: &Path) -> String {
             }
             Err(_) => "HTTP/1.1 403 Forbidden\r\n\r\n403 Forbidden".to_string(),
         }
-    } else if path.is_dir() {
-        let mut entries = tokio::fs::read_dir(path).await.unwrap();
+    } else if full_path.is_dir() {
+        let mut entries = tokio::fs::read_dir(&full_path).await.unwrap();
         let mut body = String::new();
         body.push_str("<html><h1>Directory Listing</h1><ul>");
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -90,12 +92,45 @@ async fn handle_get_request(path: &Path) -> String {
     }
 }
 
-async fn handle_post_request(path: &Path, headers: &[&str]) -> String {
-    if path.starts_with("/scripts") {
-        match tokio::fs::metadata(path).await {
+async fn handle_post_subsets_request(_socket: &mut tokio::net::TcpStream, headers: &[&str]) -> String {
+    let mut body = String::new();
+    for header in headers {
+        body.push_str(header);
+    }
+
+    let request: HashMap<String, String> = match parse_json(&body) {
+        Ok(req) => req,
+        Err(_) => return "HTTP/1.1 400 Bad Request\r\n\r\nInvalid JSON".to_string(),
+    };
+
+    let words: Vec<String> = match request.get("words") {
+        Some(words_str) => words_str.split(',').map(|s| s.trim().to_string()).collect(),
+        None => return "HTTP/1.1 400 Bad Request\r\n\r\nMissing 'words' field".to_string(),
+    };
+
+    let k: usize = match request.get("k") {
+        Some(k_str) => match k_str.parse() {
+            Ok(k) => k,
+            Err(_) => return "HTTP/1.1 400 Bad Request\r\n\r\nInvalid 'k' field".to_string(),
+        },
+        None => return "HTTP/1.1 400 Bad Request\r\n\r\nMissing 'k' field".to_string(),
+    };
+
+    let subsets = find_optimal_solutions(words, k);
+    let response = format!("{{\"subsets\": {:?}}}", subsets);
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+        response
+    )
+}
+
+async fn handle_post_request(root_folder: &Path, path: &str, headers: &[&str]) -> String {
+    let full_path = root_folder.join(path.trim_start_matches('/'));
+    if full_path.starts_with("/scripts") {
+        match tokio::fs::metadata(&full_path).await {
             Ok(metadata) => {
                 if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-                    let mut command = Command::new(path);
+                    let mut command = Command::new(&full_path);
                     for header in headers {
                         if let Some((key, value)) = header.split_once(": ") {
                             command.env(key, value);
@@ -199,5 +234,63 @@ async fn main() {
         tokio::spawn(async move {
             handle_client(socket, root_folder, &username, &password).await;
         });
+    }
+}
+
+fn find_optimal_solutions(words: Vec<String>, k: usize) -> Vec<Vec<String>> {
+    fn combinations<T: Clone>(v: &[T], k: usize) -> Vec<Vec<T>> {
+        let mut result = Vec::new();
+        let n = v.len();
+        if k > n {
+            return result;
+        }
+        let mut indices: Vec<usize> = (0..k).collect();
+        loop {
+            result.push(indices.iter().map(|&i| v[i].clone()).collect());
+            let mut i = k;
+            while i > 0 {
+                i -= 1;
+                if indices[i] != i + n - k {
+                    break;
+                }
+            }
+            if i == 0 {
+                break;
+            }
+            indices[i] += 1;
+            for j in i + 1..k {
+                indices[j] = indices[j - 1] + 1;
+            }
+        }
+        result
+    }
+
+    let all_combinations = combinations(&words, k);
+    let min_value = all_combinations
+        .iter()
+        .map(|comb| comb.iter().map(|word| word.chars().map(|c| c as u32 - 'a' as u32 + 1).sum::<u32>()).sum::<u32>())
+        .min()
+        .unwrap();
+
+    all_combinations
+        .into_iter()
+        .filter(|comb| comb.iter().map(|word| word.chars().map(|c| c as u32 - 'a' as u32 + 1).sum::<u32>()).sum::<u32>() == min_value)
+        .collect()
+}
+
+fn parse_json(body: &str) -> Result<HashMap<String, String>, ()> {
+    let mut map = HashMap::new();
+    if body.starts_with('{') && body.ends_with('}') {
+        let body = &body[1..body.len()-1];
+        for pair in body.split(',') {
+            if let Some((key, value)) = pair.split_once(':') {
+                let key = key.trim_matches(|c| c == '"' || c == ' ');
+                let value = value.trim_matches(|c| c == '"' || c == ' ');
+                map.insert(key.to_string(), value.to_string());
+            }
+        }
+        Ok(map)
+    } else {
+        Err(())
     }
 }
