@@ -83,31 +83,41 @@ async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf) 
 
 async fn handle_get_request(root_folder: &Path, path: &str) -> String {
     let full_path = root_folder.join(path.trim_start_matches('/'));
-    if full_path.is_file() {
-        match tokio::fs::read(&full_path).await {
-            Ok(contents) => {
-                let mime_type = guess_mime_type(&full_path);
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n{}",
-                    mime_type,
-                    String::from_utf8_lossy(&contents)
-                )
+    
+    if let Ok(file_metadata) = tokio::fs::metadata(&full_path).await {
+        if file_metadata.is_file() {
+            match tokio::fs::read(&full_path).await {
+                Ok(contents) => {
+                    let mime_type = guess_mime_type(&full_path);
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        mime_type,
+                        contents.len(),
+                        String::from_utf8_lossy(&contents)
+                    )
+                }
+                Err(_) => "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string(),
             }
-            Err(_) => "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string(),
+        } else if file_metadata.is_dir() {
+            let mut entries = match tokio::fs::read_dir(&full_path).await {
+                Ok(entries) => entries,
+                Err(_) => return "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string(),
+            };
+            let mut body = String::new();
+            body.push_str("<html><h1>Directory Listing</h1><ul>");
+            while let Some(entry) = entries.next_entry().await.unwrap_or_else(|_| None) {
+                let name = entry.file_name().into_string().unwrap_or_default();
+                body.push_str(&format!("<li><a href=\"/{0}\">{0}</a></li>", name));
+            }
+            body.push_str("</ul></html>");
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+        } else {
+            "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404 Not Found".to_string()
         }
-    } else if full_path.is_dir() {
-        let mut entries = tokio::fs::read_dir(&full_path).await.unwrap();
-        let mut body = String::new();
-        body.push_str("<html><h1>Directory Listing</h1><ul>");
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let name = entry.file_name().into_string().unwrap();
-            body.push_str(&format!("<li><a href=\"/{0}\">{0}</a></li>", name));
-        }
-        body.push_str("</ul></html>");
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
-            body
-        )
     } else {
         "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404 Not Found".to_string()
     }
@@ -148,42 +158,41 @@ async fn handle_post_subsets_request(_socket: &mut tokio::net::TcpStream, header
 
 async fn handle_post_request(root_folder: &Path, path: &str, headers: &[&str]) -> String {
     let full_path = root_folder.join(path.trim_start_matches('/'));
+    
     if full_path.starts_with("/scripts") {
         match tokio::fs::metadata(&full_path).await {
-            Ok(metadata) => {
-                if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-                    let mut command = tokio::process::Command::new(&full_path);
-                    for header in headers {
-                        if let Some((key, value)) = header.split_once(": ") {
-                            command.env(key, value);
-                        }
+            Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 => {
+                let mut command = tokio::process::Command::new(&full_path);
+                for header in headers {
+                    if let Some((key, value)) = header.split_once(": ") {
+                        command.env(key, value);
                     }
-                    match command.output().await {
-                        Ok(output) => {
-                            if output.status.success() {
-                                format!(
-                                    "HTTP/1.1 200 OK\r\n\r\n{}",
-                                    String::from_utf8_lossy(&output.stdout)
-                                )
-                            } else {
-                                format!(
-                                    "HTTP/1.1 500 Internal Server Error\r\n\r\n{}",
-                                    String::from_utf8_lossy(&output.stderr)
-                                )
-                            }
-                        }
-                        Err(_) => "HTTP/1.1 500 Internal Server Error\r\n\r\n500 Internal Server Error".to_string(),
+                }
+                match command.output().await {
+                    Ok(output) => {
+                        let status_code = if output.status.success() {
+                            "200 OK"
+                        } else {
+                            "500 Internal Server Error"
+                        };
+                        let response_body = String::from_utf8_lossy(&output.stdout);
+                        format!(
+                            "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            status_code,
+                            response_body.len(),
+                            response_body
+                        )
                     }
-                } else {
-                    "HTTP/1.1 403 Forbidden\r\n\r\n403 Forbidden".to_string()
+                    Err(_) => "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n500 Internal Server Error".to_string(),
                 }
             }
-            Err(_) => "HTTP/1.1 403 Forbidden\r\n\r\n403 Forbidden".to_string(),
+            _ => "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string(),
         }
     } else {
-        "HTTP/1.1 403 Forbidden\r\n\r\n403 Forbidden".to_string()
+        "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string()
     }
 }
+
 
 fn base64_decode(encoded: &str) -> Result<Vec<u8>, ()> {
     let bytes = encoded.as_bytes();
