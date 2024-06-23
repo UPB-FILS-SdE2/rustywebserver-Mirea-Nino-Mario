@@ -1,5 +1,7 @@
 use tokio::net::{TcpListener, TcpStream};
 use tokio::fs;
+use tokio::process::Command;
+use std::process::Stdio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
@@ -175,20 +177,24 @@ async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: 
         return Ok(());
     }
 
-    let output = tokio::process::Command::new(script_path)
-        .env_clear()
-        .envs(headers)
-        .env("METHOD", "GET")
-        .env("PATH", path)
-        .output()
-        .await?;
+    let mut command = Command::new(script_path);
+    command.env_clear()
+           .envs(headers)
+           .env("METHOD", "GET")
+           .env("PATH", path)
+           .stdout(Stdio::piped())
+           .stderr(Stdio::piped());
+
+    let output = command.output().await?;
 
     if output.status.success() {
+        let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
         log_request(client_ip, path, 200, "OK");
-        send_binary_response(stream, 200, "OK", "text/plain; charset=utf-8", &output.stdout).await?;
+        send_response(stream, 200, "OK", "text/plain; charset=utf-8", &content).await?;
     } else {
+        let error_message = String::from_utf8_lossy(&output.stderr).trim().to_string();
         log_request(client_ip, path, 500, "Internal Server Error");
-        send_response(stream, 500, "Internal Server Error", "text/html; charset=utf-8", "<html>500 Internal Server Error</html>").await?;
+        send_response(stream, 500, "Internal Server Error", "text/plain; charset=utf-8", &error_message).await?;
     }
 
     Ok(())
