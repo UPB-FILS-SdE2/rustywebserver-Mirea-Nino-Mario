@@ -98,7 +98,7 @@ async fn handle_get_request(root_folder: &Path, path: &str) -> String {
                         )
                     }
                     Err(_) => {
-                        "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string()
+                        "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n500 Internal Server Error".to_string()
                     }
                 }
             } else if file_metadata.is_dir() {
@@ -118,7 +118,7 @@ async fn handle_get_request(root_folder: &Path, path: &str) -> String {
                         )
                     }
                     Err(_) => {
-                        "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string()
+                        "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n500 Internal Server Error".to_string()
                     }
                 }
             } else {
@@ -130,6 +130,7 @@ async fn handle_get_request(root_folder: &Path, path: &str) -> String {
         }
     }
 }
+
 
 
 
