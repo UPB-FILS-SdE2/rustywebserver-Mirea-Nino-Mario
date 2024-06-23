@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::process::Command;
+use std::os::unix::fs::PermissionsExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -89,20 +90,47 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
 
     if !full_path.starts_with(root) {
         log_request(client_ip, path, 403, "Forbidden");
-        send_response(stream, 403, "Forbidden", "text/plain; charset=utf-8", "Access denied").await?;
+        send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
         return Ok(());
     }
 
-    if full_path.is_dir() {
-        handle_directory_listing(stream, full_path, path, client_ip).await?;
-    } else if full_path.is_file() {
-        let content = fs::read(full_path).await?;
-        let content_type = get_content_type(full_path);
-        log_request(client_ip, path, 200, "OK");
-        send_binary_response(stream, 200, "OK", &content_type, &content).await?;
-    } else {
-        log_request(client_ip, path, 404, "Not Found");
-        send_response(stream, 404, "Not Found", "text/plain; charset=utf-8", "File not found").await?;
+    match fs::metadata(&full_path).await {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                handle_directory_listing(stream, full_path, path, client_ip).await?;
+            } else if metadata.is_file() {
+                let permissions = metadata.permissions();
+                if permissions.mode() & 0o444 == 0 {
+                    // File is not readable
+                    log_request(client_ip, path, 403, "Forbidden");
+                    send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
+                } else {
+                    // File is readable
+                    match fs::read(&full_path).await {
+                        Ok(content) => {
+                            let content_type = get_content_type(&full_path);
+                            log_request(client_ip, path, 200, "OK");
+                            send_binary_response(stream, 200, "OK", &content_type, &content).await?;
+                        },
+                        Err(_) => {
+                            log_request(client_ip, path, 403, "Forbidden");
+                            send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
+                        }
+                    }
+                }
+            } else {
+                log_request(client_ip, path, 404, "Not Found");
+                send_response(stream, 404, "Not Found", "text/plain; charset=utf-8", "File not found").await?;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            log_request(client_ip, path, 403, "Forbidden");
+            send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
+        },
+        Err(_) => {
+            log_request(client_ip, path, 404, "Not Found");
+            send_response(stream, 404, "Not Found", "text/plain; charset=utf-8", "File not found").await?;
+        }
     }
 
     Ok(())
@@ -220,6 +248,6 @@ async fn send_response(stream: &mut TcpStream, status_code: u32, status: &str, c
     Ok(())
 }
 
-fn log_request(client_ip: &str, path: impl AsRef<Path>, status_code: u32, status_text: &str) {
-    println!("GET {} {} -> {} ({})", client_ip, path.as_ref().display(), status_code, status_text);
+fn log_request(client_ip: &str, path: &str, status_code: u32, status_text: &str) {
+    println!("GET {} {} -> {} ({})", client_ip, path, status_code, status_text);
 }
