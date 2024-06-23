@@ -88,7 +88,7 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
     let requested_path = root_path.join(path.trim_start_matches('/'));
     
     // Normalize the path to resolve any '..' components
-    let canonical_path = match tokio::fs::canonicalize(&requested_path).await {
+    let canonical_path = match fs::canonicalize(&requested_path).await {
         Ok(p) => p,
         Err(_) => {
             log_request(client_ip, path, 404, "Not Found");
@@ -104,20 +104,25 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
         return Ok(());
     }
 
-    match tokio::fs::metadata(&canonical_path).await {
+    match fs::metadata(&canonical_path).await {
         Ok(metadata) => {
             if metadata.is_dir() {
                 handle_directory_listing(stream, &canonical_path, path, client_ip).await?;
             } else if metadata.is_file() {
-                match tokio::fs::read(&canonical_path).await {
+                match fs::read(&canonical_path).await {
                     Ok(content) => {
                         let content_type = get_content_type(&canonical_path);
                         log_request(client_ip, path, 200, "OK");
                         send_binary_response(stream, 200, "OK", &content_type, &content).await?;
                     },
-                    Err(_) => {
-                        log_request(client_ip, path, 403, "Forbidden");
-                        send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            log_request(client_ip, path, 403, "Forbidden");
+                            send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
+                        } else {
+                            log_request(client_ip, path, 404, "Not Found");
+                            send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
+                        }
                     }
                 }
             } else {
@@ -125,13 +130,14 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
                 send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
             }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            log_request(client_ip, path, 403, "Forbidden");
-            send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
-        },
-        Err(_) => {
-            log_request(client_ip, path, 404, "Not Found");
-            send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                log_request(client_ip, path, 403, "Forbidden");
+                send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
+            } else {
+                log_request(client_ip, path, 404, "Not Found");
+                send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
+            }
         }
     }
 
