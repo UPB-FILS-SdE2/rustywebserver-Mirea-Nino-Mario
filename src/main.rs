@@ -190,13 +190,22 @@ async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: 
     if output.status.success() {
         let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
         log_request(client_ip, path, 200, "OK");
-        send_response(stream, 200, "OK", "text/plain; charset=utf-8", &content).await?;
+        send_script_response(stream, 200, "OK", "text/plain; charset=utf-8", &content).await?;
     } else {
         let error_message = String::from_utf8_lossy(&output.stderr).trim().to_string();
         log_request(client_ip, path, 500, "Internal Server Error");
-        send_response(stream, 500, "Internal Server Error", "text/plain; charset=utf-8", &error_message).await?;
+        send_script_response(stream, 500, "Internal Server Error", "text/plain; charset=utf-8", &error_message).await?;
     }
 
+    Ok(())
+}
+
+async fn send_script_response(stream: &mut TcpStream, status_code: u32, status: &str, content_type: &str, message: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let response = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status_code, status, content_type, message.len(), message
+    );
+    stream.write_all(response.as_bytes()).await?;
     Ok(())
 }
 
