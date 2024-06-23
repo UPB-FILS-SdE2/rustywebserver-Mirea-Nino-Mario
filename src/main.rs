@@ -216,10 +216,11 @@ fn base64_decode(encoded: &str) -> Result<Vec<u8>, ()> {
 
 fn guess_mime_type<P: AsRef<Path>>(path: P) -> &'static str {
     match path.as_ref().extension().and_then(|ext| ext.to_str()) {
-        Some("html") => "text/html",
-        Some("css") => "text/css",
-        Some("js") => "application/javascript",
-        Some("json") => "application/json",
+        Some("html") => "text/html; charset=utf-8",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
