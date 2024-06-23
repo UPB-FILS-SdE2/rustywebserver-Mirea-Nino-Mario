@@ -81,6 +81,7 @@ async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf) 
     Ok(())
 }
 
+
 async fn handle_get_request(root_folder: &Path, path: &str) -> String {
     let full_path = root_folder.join(path.trim_start_matches('/'));
 
@@ -91,11 +92,10 @@ async fn handle_get_request(root_folder: &Path, path: &str) -> String {
                     Ok(contents) => {
                         let mime_type = guess_mime_type(&full_path);
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             mime_type,
-                            contents.len(),
-                            String::from_utf8_lossy(&contents)
-                        )
+                            contents.len()
+                        ) + &String::from_utf8_lossy(&contents)
                     }
                     Err(_) => {
                         "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n500 Internal Server Error".to_string()
@@ -244,6 +244,7 @@ fn guess_mime_type<P: AsRef<Path>>(path: P) -> &'static str {
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
+        Some("zip") => "application/zip",
         _ => "application/octet-stream",
     }
 }
