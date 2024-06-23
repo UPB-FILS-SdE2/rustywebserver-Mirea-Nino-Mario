@@ -1,270 +1,214 @@
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::env;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::process::Command;
 
 #[tokio::main]
-async fn main() {
-    let args: Vec<String> = env::args().collect();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
     if args.len() != 3 {
-        eprintln!("Usage: {} PORT ROOT_FOLDER", args[0]);
-        return;
+        eprintln!("Usage: {} <PORT> <ROOT_FOLDER>", args[0]);
+        std::process::exit(1);
     }
 
-    let port: u16 = match args[1].parse() {
-        Ok(port) => port,
-        Err(_) => {
-            eprintln!("Invalid port number: {}", args[1]);
-            return;
-        }
-    };
+    let port = &args[1];
+    let root_folder = &args[2];
 
-    let root_folder = PathBuf::from(&args[2]);
+    println!("Root folder: {}", fs::canonicalize(root_folder).await?.display());
+    println!("Server listening on 0.0.0.0:{}", port);
 
-    let listener = match TcpListener::bind("127.0.0.1:8000").await {
-        Ok(listener) => {
-            println!("Server listening on 0.0.0.0:{}", port);
-            listener
-        }
-        Err(e) => {
-            eprintln!("Failed to bind to port {}: {}", port, e);
-            return;
-        }
-    };
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    let root = Arc::new(root_folder.to_string());
 
     loop {
-        match listener.accept().await {
-            Ok((socket, _)) => {
-                let root_folder = root_folder.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(socket, root_folder).await {
-                        eprintln!("Failed to handle client: {}", e);
-                    }
-                });
+        let (stream, _) = listener.accept().await?;
+        let root = Arc::clone(&root);
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream, root).await {
+                eprintln!("Error handling connection: {}", e);
             }
-            Err(e) => eprintln!("Failed to accept connection: {}", e),
-        }
+        });
     }
 }
 
-async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let mut buffer = vec![0; 1024];
-    let n = socket.read(&mut buffer).await?;
-    if n == 0 {
-        return Ok(());
+async fn handle_connection(mut stream: TcpStream, root: Arc<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buffer = [0; 8192];
+    let size = stream.read(&mut buffer).await?;
+    let request = String::from_utf8_lossy(&buffer[..size]);
+    let (request_line, headers, message) = parse_request(&request);
+    let (method, path, _) = process_request_line(&request_line);
+
+    let client_ip = stream.peer_addr()?.ip().to_string();
+
+    if path.starts_with("/scripts/") {
+        handle_script(&mut stream, &root, method, path, &headers, &message, &client_ip).await?;
+    } else if method == "GET" {
+        handle_get(&mut stream, &root, path, &client_ip).await?;
+    } else {
+        log_request(&client_ip, path, 501, "Not Implemented");
+        send_response(&mut stream, 501, "Not Implemented", "text/plain; charset=utf-8", "Method not implemented").await?;
     }
 
-    let request = String::from_utf8_lossy(&buffer[..n]);
-    let mut lines = request.lines();
-    if let Some(request_line) = lines.next() {
-        let parts: Vec<&str> = request_line.split_whitespace().collect();
-        if parts.len() == 3 {
-            let method = parts[0];
-            let path = parts[1];
-
-            let response = if method == "GET" {
-                handle_get_request(&root_folder, path).await
-            } else if method == "POST" && path == "/subsets" {
-                handle_post_subsets_request(&mut socket, &mut lines.collect::<Vec<&str>>()).await
-            } else {
-                handle_post_request(&root_folder, path, &mut lines.collect::<Vec<&str>>()).await
-            };
-
-            socket.write_all(response.as_bytes()).await?;
-        }
-    }
     Ok(())
 }
 
-async fn handle_get_request(root_folder: &Path, path: &str) -> String {
-    let full_path = root_folder.join(path.trim_start_matches('/'));
+fn parse_request(request: &str) -> (String, HashMap<String, String>, String) {
+    let mut parts = request.splitn(2, "\r\n\r\n");
+    let header_part = parts.next().unwrap_or("");
+    let message = parts.next().unwrap_or("").to_string();
 
-    match tokio::fs::metadata(&full_path).await {
-        Ok(file_metadata) => {
-            if file_metadata.is_file() {
-                match tokio::fs::read(&full_path).await {
-                    Ok(contents) => {
-                        let mime_type = guess_mime_type(&full_path);
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            mime_type,
-                            contents.len(),
-                            String::from_utf8_lossy(&contents)
-                        )
-                    }
-                    Err(_) => {
-                        "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n500 Internal Server Error".to_string()
-                    }
-                }
-            } else if file_metadata.is_dir() {
-                match tokio::fs::read_dir(&full_path).await {
-                    Ok(mut entries) => {
-                        let mut body = String::new();
-                        body.push_str("<html><h1>Directory Listing</h1><ul>");
-                        while let Some(entry) = entries.next_entry().await.unwrap_or_else(|_| None) {
-                            let name = entry.file_name().into_string().unwrap_or_default();
-                            body.push_str(&format!("<li><a href=\"/{0}\">{0}</a></li>", name));
-                        }
-                        body.push_str("</ul></html>");
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        )
-                    }
-                    Err(_) => {
-                        "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n500 Internal Server Error".to_string()
-                    }
-                }
-            } else {
-                "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404 Not Found".to_string()
-            }
-        }
-        Err(_) => {
-            "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404 Not Found".to_string()
-        }
-    }
-}
+    let mut headers = header_part.lines();
+    let request_line = headers.next().unwrap_or("").to_string();
 
-async fn handle_post_subsets_request(_socket: &mut tokio::net::TcpStream, headers: &[&str]) -> String {
-    let mut body = String::new();
+    let mut header_map = HashMap::new();
     for header in headers {
-        body.push_str(header);
+        let mut parts = header.splitn(2, ": ");
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            header_map.insert(key.to_string(), value.to_string());
+        }
     }
 
-    let request: HashMap<String, String> = match parse_json(&body) {
-        Ok(req) => req,
-        Err(_) => return "HTTP/1.1 400 Bad Request\r\n\r\nInvalid JSON".to_string(),
-    };
-
-    let words: Vec<String> = match request.get("words") {
-        Some(words_str) => words_str.split(',').map(|s| s.trim().to_string()).collect(),
-        None => return "HTTP/1.1 400 Bad Request\r\n\r\nMissing 'words' field".to_string(),
-    };
-
-    let k: usize = match request.get("k") {
-        Some(k_str) => match k_str.parse() {
-            Ok(k) => k,
-            Err(_) => return "HTTP/1.1 400 Bad Request\r\n\r\nInvalid 'k' field".to_string(),
-        },
-        None => return "HTTP/1.1 400 Bad Request\r\n\r\nMissing 'k' field".to_string(),
-    };
-
-    let subsets = find_optimal_solutions(words, k);
-    let response = format!("{{\"subsets\": {:?}}}", subsets);
-    format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
-        response
-    )
+    (request_line, header_map, message)
 }
 
-async fn handle_post_request(root_folder: &Path, path: &str, headers: &[&str]) -> String {
-    let full_path = root_folder.join(path.trim_start_matches('/'));
-    
-    if full_path.starts_with("/scripts") {
-        match tokio::fs::metadata(&full_path).await {
-            Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 => {
-                let mut command = tokio::process::Command::new(&full_path);
-                for header in headers {
-                    if let Some((key, value)) = header.split_once(": ") {
-                        command.env(key, value);
-                    }
-                }
-                match command.output().await {
-                    Ok(output) => {
-                        let status_code = if output.status.success() {
-                            "200 OK"
-                        } else {
-                            "500 Internal Server Error"
-                        };
-                        let response_body = String::from_utf8_lossy(&output.stdout);
-                        format!(
-                            "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            status_code,
-                            response_body.len(),
-                            response_body
-                        )
-                    }
-                    Err(_) => "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n500 Internal Server Error".to_string(),
-                }
-            }
-            _ => "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string(),
-        }
+fn process_request_line(request_line: &str) -> (&str, &str, &str) {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+    let version = parts.next().unwrap_or("");
+    (method, path, version)
+}
+
+async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = format!("{}{}", root, path);
+    let path = Path::new(&file_path);
+
+    if !path.starts_with(root) {
+        log_request(client_ip, path, 403, "Forbidden");
+        send_response(stream, 403, "Forbidden", "text/plain; charset=utf-8", "Access denied").await?;
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        handle_directory_listing(stream, path, client_ip).await?;
+    } else if path.is_file() {
+        let content = fs::read(path).await?;
+        let content_type = get_content_type(path);
+        log_request(client_ip, path, 200, "OK");
+        send_response(stream, 200, "OK", &content_type, &String::from_utf8_lossy(&content)).await?;
     } else {
-        "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string()
-    }
-}
-
-fn guess_mime_type<P: AsRef<Path>>(path: P) -> &'static str {
-    match path.as_ref().extension().and_then(|ext| ext.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("txt") => "text/plain; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "application/javascript; charset=utf-8",
-        Some("json") => "application/json; charset=utf-8",
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        _ => "application/octet-stream",
-    }
-}
-
-fn find_optimal_solutions(words: Vec<String>, k: usize) -> Vec<Vec<String>> {
-    fn combinations<T: Clone>(v: &[T], k: usize) -> Vec<Vec<T>> {
-        let mut result = Vec::new();
-        let n = v.len();
-        if k > n {
-            return result;
-        }
-        let mut indices: Vec<usize> = (0..k).collect();
-        loop {
-            result.push(indices.iter().map(|&i| v[i].clone()).collect());
-            let mut i = k;
-            while i > 0 {
-                i -= 1;
-                if indices[i] != i + n - k {
-                    break;
-                }
-            }
-            if i == 0 {
-                break;
-            }
-            indices[i] += 1;
-            for j in i + 1..k {
-                indices[j] = indices[j - 1] + 1;
-            }
-        }
-        result
+        log_request(client_ip, path, 404, "Not Found");
+        send_response(stream, 404, "Not Found", "text/plain; charset=utf-8", "File not found").await?;
     }
 
-    let all_combinations = combinations(&words, k);
-    let min_value = all_combinations
-        .iter()
-        .map(|comb| comb.iter().map(|word| word.chars().map(|c| c as u32 - 'a' as u32 + 1).sum::<u32>()).sum::<u32>())
-        .min()
-        .unwrap();
-
-    all_combinations
-        .into_iter()
-        .filter(|comb| comb.iter().map(|word| word.chars().map(|c| c as u32 - 'a' as u32 + 1).sum::<u32>()).sum::<u32>() == min_value)
-        .collect()
+    Ok(())
 }
 
-fn parse_json(body: &str) -> Result<HashMap<String, String>, ()> {
-    let mut map = HashMap::new();
-    if body.starts_with('{') && body.ends_with('}') {
-        let body = &body[1..body.len()-1];
-        for pair in body.split(',') {
-            if let Some((key, value)) = pair.split_once(':') {
-                let key = key.trim_matches(|c| c == '"' || c == ' ');
-                let value = value.trim_matches(|c| c == '"' || c == ' ');
-                map.insert(key.to_string(), value.to_string());
+async fn handle_directory_listing(stream: &mut TcpStream, path: &Path, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut html = String::from("<html><h1>Directory Listing</h1><ul>");
+
+    html.push_str("<li><a href=\"..\">..</a></li>");
+
+    let mut entries = fs::read_dir(path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let file_name = entry.file_name();
+        if let Some(name) = file_name.to_str() {
+            html.push_str(&format!("<li><a href=\"{}\">{}</a></li>", name, name));
+        }
+    }
+
+    html.push_str("</ul></html>");
+
+    log_request(client_ip, path, 200, "OK");
+    send_response(stream, 200, "OK", "text/html; charset=utf-8", &html).await?;
+
+    Ok(())
+}
+
+async fn handle_script(stream: &mut TcpStream, root: &str, method: &str, path: &str, headers: &HashMap<String, String>, message: &str, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let script_path = format!("{}{}", root, path);
+    let script_path = Path::new(&script_path);
+
+    if !script_path.starts_with(root) || !script_path.starts_with(format!("{}/scripts", root)) {
+        log_request(client_ip, path, 403, "Forbidden");
+        send_response(stream, 403, "Forbidden", "text/plain; charset=utf-8", "Access denied").await?;
+        return Ok(());
+    }
+
+    if !script_path.exists() || !script_path.is_file() {
+        log_request(client_ip, path, 404, "Not Found");
+        send_response(stream, 404, "Not Found", "text/plain; charset=utf-8", "Script not found").await?;
+        return Ok(());
+    }
+
+    let mut command = Command::new(script_path);
+    command.current_dir(PathBuf::from(root).join("scripts"));
+
+    // Set environment variables
+    for (key, value) in headers {
+        command.env(key, value);
+    }
+    command.env("Method", method);
+    command.env("Path", path);
+
+    // Handle query string
+    if let Some(query_string) = path.split('?').nth(1) {
+        for pair in query_string.split('&') {
+            let mut parts = pair.split('=');
+            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                command.env(format!("Query_{}", key), value);
             }
         }
-        Ok(map)
+    }
+
+    // Handle POST data
+    if method == "POST" {
+        command.env("CONTENT_LENGTH", message.len().to_string());
+        command.env("CONTENT_TYPE", headers.get("Content-Type").unwrap_or(&String::new()));
+    }
+
+    let output = if method == "POST" {
+        command.arg(message).output().await?
     } else {
-        Err(())
+        command.output().await?
+    };
+
+    if output.status.success() {
+        log_request(client_ip, path, 200, "OK");
+        send_response(stream, 200, "OK", "text/plain; charset=utf-8", &String::from_utf8_lossy(&output.stdout)).await?;
+    } else {
+        log_request(client_ip, path, 500, "Internal Server Error");
+        send_response(stream, 500, "Internal Server Error", "text/plain; charset=utf-8", &String::from_utf8_lossy(&output.stderr)).await?;
     }
+
+    Ok(())
+}
+
+fn get_content_type(path: &Path) -> String {
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some("txt") => "text/plain; charset=utf-8".to_string(),
+        Some("html") => "text/html; charset=utf-8".to_string(),
+        Some("css") => "text/css; charset=utf-8".to_string(),
+        Some("js") => "text/javascript; charset=utf-8".to_string(),
+        Some("jpg") | Some("jpeg") => "image/jpeg".to_string(),
+        Some("png") => "image/png".to_string(),
+        Some("zip") => "application/zip".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
+}
+
+async fn send_response(stream: &mut TcpStream, status_code: u32, status: &str, content_type: &str, message: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let response = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: closed\r\n\r\n{}",
+        status_code, status, content_type, message.len(), message
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+fn log_request(client_ip: &str, path: impl AsRef<Path>, status_code: u32, status_text: &str) {
+    println!("$Request {} ${} -> {} ({})", client_ip, path.as_ref().display(), status_code, status_text);
 }
