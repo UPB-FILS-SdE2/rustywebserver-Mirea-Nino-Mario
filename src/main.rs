@@ -4,7 +4,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::process::Command;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,18 +38,15 @@ async fn handle_connection(mut stream: TcpStream, root: Arc<String>) -> Result<(
     let mut buffer = [0; 8192];
     let size = stream.read(&mut buffer).await?;
     let request = String::from_utf8_lossy(&buffer[..size]);
-    let (request_line, headers, message) = parse_request(&request);
-    let (method, path, _) = process_request_line(&request_line);
+    let (request_line, headers, _) = parse_request(&request);
+    let (_, path, _) = process_request_line(&request_line);
 
     let client_ip = stream.peer_addr()?.ip().to_string();
 
     if path.starts_with("/scripts/") {
-        handle_script(&mut stream, &root, method, path, &headers, &message, &client_ip).await?;
-    } else if method == "GET" {
-        handle_get(&mut stream, &root, path, &client_ip).await?;
+        handle_script(&mut stream, &root, path, &headers, &client_ip).await?;
     } else {
-        log_request(&client_ip, path, 501, "Not Implemented");
-        send_response(&mut stream, 501, "Not Implemented", "text/plain; charset=utf-8", "Method not implemented").await?;
+        handle_get(&mut stream, &root, path, &client_ip).await?;
     }
 
     Ok(())
@@ -87,26 +83,38 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
     let root_path = PathBuf::from(root);
     let requested_path = root_path.join(path.trim_start_matches('/'));
     
-    // Check if the requested path is within the root directory
-    if !requested_path.starts_with(&root_path) {
+    // Normalize both paths to compare them properly
+    let normalized_requested_path = match fs::canonicalize(&requested_path).await {
+        Ok(p) => p,
+        Err(_) => {
+            log_request(client_ip, path, 404, "Not Found");
+            send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
+            return Ok(());
+        }
+    };
+    
+    let normalized_root_path = fs::canonicalize(&root_path).await?;
+
+    // Check if the normalized requested path starts with the normalized root path
+    if !normalized_requested_path.starts_with(&normalized_root_path) {
         log_request(client_ip, path, 403, "Forbidden");
         send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
         return Ok(());
     }
 
-    match fs::metadata(&requested_path).await {
+    match fs::metadata(&normalized_requested_path).await {
         Ok(metadata) => {
             if metadata.is_dir() {
-                handle_directory_listing(stream, &requested_path, path, client_ip).await?;
+                handle_directory_listing(stream, &normalized_requested_path, path, client_ip).await?;
             } else if metadata.is_file() {
-                match fs::read(&requested_path).await {
+                match fs::read(&normalized_requested_path).await {
                     Ok(content) => {
-                        let content_type = get_content_type(&requested_path);
+                        let content_type = get_content_type(&normalized_requested_path);
                         log_request(client_ip, path, 200, "OK");
                         send_binary_response(stream, 200, "OK", &content_type, &content).await?;
                     },
                     Err(e) => {
-                        eprintln!("Error reading file: {:?}", e); // Debug print
+                        eprintln!("Error reading file: {:?}", e);
                         log_request(client_ip, path, 403, "Forbidden");
                         send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
                     }
@@ -117,7 +125,7 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
             }
         },
         Err(e) => {
-            eprintln!("Error getting metadata: {:?}", e); // Debug print
+            eprintln!("Error getting metadata: {:?}", e);
             log_request(client_ip, path, 404, "Not Found");
             send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
         }
@@ -157,60 +165,30 @@ async fn handle_directory_listing(stream: &mut TcpStream, full_path: &Path, disp
     Ok(())
 }
 
-async fn handle_script(stream: &mut TcpStream, root: &str, method: &str, path: &str, headers: &HashMap<String, String>, message: &str, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let script_path = format!("{}{}", root, path);
-    let full_path = Path::new(&script_path);
+async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: &HashMap<String, String>, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let script_path = format!("{}/scripts/{}", root, path.trim_start_matches("/scripts/"));
+    let script_path = Path::new(&script_path);
 
-    if !full_path.starts_with(root) || !path.starts_with("/scripts/") {
-        log_request(client_ip, path, 403, "Forbidden");
-        send_response(stream, 403, "Forbidden", "text/plain; charset=utf-8", "Access denied").await?;
-        return Ok(());
-    }
-
-    if !full_path.exists() || !full_path.is_file() {
+    if !script_path.exists() || !script_path.is_file() {
         log_request(client_ip, path, 404, "Not Found");
-        send_response(stream, 404, "Not Found", "text/plain; charset=utf-8", "Script not found").await?;
+        send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
         return Ok(());
     }
 
-    let mut command = Command::new(script_path);
-    command.current_dir(PathBuf::from(root).join("scripts"));
-
-    // Set environment variables
-    for (key, value) in headers {
-        command.env(key, value);
-    }
-    command.env("Method", method);
-    command.env("Path", path);
-
-    // Handle query string
-    if let Some(query_string) = path.split('?').nth(1) {
-        for pair in query_string.split('&') {
-            let mut parts = pair.split('=');
-            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                command.env(format!("Query_{}", key), value);
-            }
-        }
-    }
-
-    // Handle POST data
-    if method == "POST" {
-        command.env("CONTENT_LENGTH", message.len().to_string());
-        command.env("CONTENT_TYPE", headers.get("Content-Type").unwrap_or(&String::new()));
-    }
-
-    let output = if method == "POST" {
-        command.arg(message).output().await?
-    } else {
-        command.output().await?
-    };
+    let output = tokio::process::Command::new(script_path)
+        .env_clear()
+        .envs(headers)
+        .env("METHOD", "GET")
+        .env("PATH", path)
+        .output()
+        .await?;
 
     if output.status.success() {
         log_request(client_ip, path, 200, "OK");
-        send_response(stream, 200, "OK", "text/plain; charset=utf-8", &String::from_utf8_lossy(&output.stdout)).await?;
+        send_binary_response(stream, 200, "OK", "text/plain; charset=utf-8", &output.stdout).await?;
     } else {
         log_request(client_ip, path, 500, "Internal Server Error");
-        send_response(stream, 500, "Internal Server Error", "text/plain; charset=utf-8", &String::from_utf8_lossy(&output.stderr)).await?;
+        send_response(stream, 500, "Internal Server Error", "text/html; charset=utf-8", "<html>500 Internal Server Error</html>").await?;
     }
 
     Ok(())
