@@ -1,63 +1,105 @@
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::env;
-use std::path::{Path, PathBuf};
-use tokio::process::Command;
 use std::os::unix::fs::PermissionsExt;
-use std::str;
+use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
-async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf, valid_user: &str, valid_pass: &str) {
-    let mut buffer = vec![0; 1024];
-    if let Ok(n) = socket.read(&mut buffer).await {
-        if n == 0 {
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 4 {
+        eprintln!("Usage: {} ROOT_FOLDER USERNAME PASSWORD", args[0]);
+        return;
+    }
+
+    let port: u16 = 8000;
+    let root_folder = PathBuf::from(&args[1]);
+    let username = args[2].clone();
+    let password = args[3].clone();
+
+    println!("Root folder: {:?}", root_folder.canonicalize().unwrap());
+
+    let listener = match TcpListener::bind(("0.0.0.0", port)).await {
+        Ok(listener) => {
+            println!("Server listening on 0.0.0.0:{}", port);
+            listener
+        }
+        Err(e) => {
+            eprintln!("Failed to bind to port {}: {}", port, e);
             return;
         }
+    };
 
-        let request = String::from_utf8_lossy(&buffer[..n]);
-        let mut lines = request.lines();
-        if let Some(request_line) = lines.next() {
-            let parts: Vec<&str> = request_line.split_whitespace().collect();
-            if parts.len() == 3 {
-                let method = parts[0];
-                let path = parts[1];
+    loop {
+        match listener.accept().await {
+            Ok((socket, _)) => {
+                println!("Accepted new connection");
+                let root_folder = root_folder.clone();
+                let username = username.clone();
+                let password = password.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_client(socket, root_folder, &username, &password).await {
+                        eprintln!("Failed to handle client: {}", e);
+                    }
+                });
+            }
+            Err(e) => eprintln!("Failed to accept connection: {}", e),
+        }
+    }
+}
 
-                let mut authenticated = false;
-                for line in &mut lines {
-                    if line.starts_with("Authorization: Basic ") {
-                        let base64_credentials = &line["Authorization: Basic ".len()..];
-                        if let Ok(decoded) = base64_decode(base64_credentials) {
-                            if let Ok(credentials) = String::from_utf8(decoded) {
-                                let mut creds = credentials.splitn(2, ':');
-                                if let (Some(user), Some(pass)) = (creds.next(), creds.next()) {
-                                    if user == valid_user && pass == valid_pass {
-                                        authenticated = true;
-                                        break;
-                                    }
+async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf, valid_user: &str, valid_pass: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buffer = vec![0; 1024];
+    let n = socket.read(&mut buffer).await?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let request = String::from_utf8_lossy(&buffer[..n]);
+    let mut lines = request.lines();
+    if let Some(request_line) = lines.next() {
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
+        if parts.len() == 3 {
+            let method = parts[0];
+            let path = parts[1];
+
+            let mut authenticated = false;
+            for line in &mut lines {
+                if line.starts_with("Authorization: Basic ") {
+                    let base64_credentials = &line["Authorization: Basic ".len()..];
+                    if let Ok(decoded) = base64_decode(base64_credentials) {
+                        if let Ok(credentials) = String::from_utf8(decoded) {
+                            let mut creds = credentials.splitn(2, ':');
+                            if let (Some(user), Some(pass)) = (creds.next(), creds.next()) {
+                                if user == valid_user && pass == valid_pass {
+                                    authenticated = true;
+                                    break;
                                 }
                             }
                         }
                     }
                 }
-
-                if !authenticated {
-                    let response = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic\r\n\r\n";
-                    socket.write_all(response.as_bytes()).await.unwrap();
-                    return;
-                }
-
-                let response = if method == "GET" {
-                    handle_get_request(&root_folder, path).await
-                } else if method == "POST" && path == "/subsets" {
-                    handle_post_subsets_request(&mut socket, &mut lines.collect::<Vec<&str>>()).await
-                } else {
-                    handle_post_request(&root_folder, path, &mut lines.collect::<Vec<&str>>()).await
-                };
-
-                socket.write_all(response.as_bytes()).await.unwrap();
             }
+
+            if !authenticated {
+                let response = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic\r\n\r\n";
+                socket.write_all(response.as_bytes()).await?;
+                return Ok(());
+            }
+
+            let response = if method == "GET" {
+                handle_get_request(&root_folder, path).await
+            } else if method == "POST" && path == "/subsets" {
+                handle_post_subsets_request(&mut socket, &mut lines.collect::<Vec<&str>>()).await
+            } else {
+                handle_post_request(&root_folder, path, &mut lines.collect::<Vec<&str>>()).await
+            };
+
+            socket.write_all(response.as_bytes()).await?;
         }
     }
+    Ok(())
 }
 
 async fn handle_get_request(root_folder: &Path, path: &str) -> String {
@@ -130,7 +172,7 @@ async fn handle_post_request(root_folder: &Path, path: &str, headers: &[&str]) -
         match tokio::fs::metadata(&full_path).await {
             Ok(metadata) => {
                 if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-                    let mut command = Command::new(&full_path);
+                    let mut command = tokio::process::Command::new(&full_path);
                     for header in headers {
                         if let Some((key, value)) = header.split_once(": ") {
                             command.env(key, value);
@@ -166,75 +208,42 @@ async fn handle_post_request(root_folder: &Path, path: &str, headers: &[&str]) -
 fn base64_decode(encoded: &str) -> Result<Vec<u8>, ()> {
     let bytes = encoded.as_bytes();
     let mut buffer = Vec::new();
-    let mut padding = 0;
-
-    for chunk in bytes.chunks(4) {
-        let mut acc = 0u32;
-        let mut bits = 0;
-
-        for &byte in chunk {
-            acc <<= 6;
-            match byte {
-                b'A'..=b'Z' => acc |= (byte - b'A') as u32,
-                b'a'..=b'z' => acc |= (byte - b'a' + 26) as u32,
-                b'0'..=b'9' => acc |= (byte - b'0' + 52) as u32,
-                b'+' => acc |= 62,
-                b'/' => acc |= 63,
-                b'=' => {
-                    acc >>= 6;
-                    padding += 1;
-                }
-                _ => return Err(()),
+    let mut value = 0;
+    let mut bits = 0;
+    for &byte in bytes {
+        let digit = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => {
+                value <<= 6;
+                bits += 6;
+                continue;
             }
-            bits += 6;
+            _ => return Err(()),
+        };
+        value = (value << 6) | (digit as u32);
+        bits += 6;
+        if bits >= 8 {
+            buffer.push((value >> (bits - 8)) as u8);
+            bits -= 8;
         }
-
-        buffer.extend_from_slice(&acc.to_be_bytes()[1..1 + (bits - padding * 6) / 8]);
     }
-
     Ok(buffer)
 }
 
-fn guess_mime_type(path: &Path) -> &'static str {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
+fn guess_mime_type<P: AsRef<Path>>(path: P) -> &'static str {
+    match path.as_ref().extension().and_then(|ext| ext.to_str()) {
+        Some("html") => "text/html",
+        Some("css") => "text/css",
+        Some("js") => "application/javascript",
+        Some("json") => "application/json",
         Some("png") => "image/png",
-        Some("jpeg") | Some("jpg") => "image/jpeg",
-        Some("zip") => "application/zip",
-        Some("txt") => "text/plain; charset=utf-8",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
         _ => "application/octet-stream",
-    }
-}
-
-#[tokio::main]
-async fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
-        eprintln!("Usage: {} ROOT_FOLDER USERNAME PASSWORD", args[0]);
-        return;
-    }
-
-    let port: u16 = 8000;
-    let root_folder = PathBuf::from(&args[1]);
-    let username = args[2].clone();
-    let password = args[3].clone();
-
-    println!("Root folder: {:?}", root_folder.canonicalize().unwrap());
-    println!("Server listening on 0.0.0.0:{}", port);
-
-    let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
-    println!("Server started on 0.0.0.0:{}", port);
-
-    loop {
-        let (socket, _) = listener.accept().await.unwrap();
-        let root_folder = root_folder.clone();
-        let username = username.clone();
-        let password = password.clone();
-        tokio::spawn(async move {
-            handle_client(socket, root_folder, &username, &password).await;
-        });
     }
 }
 
