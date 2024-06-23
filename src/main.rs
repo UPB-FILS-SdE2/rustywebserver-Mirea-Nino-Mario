@@ -23,11 +23,9 @@ async fn main() {
 
     let root_folder = PathBuf::from(&args[2]);
 
-    //println!("Root folder: {:?}", root_folder.canonicalize().unwrap());
-
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(listener) => {
-            //println!("Server listening on 0.0.0.0:{}", port);
+            println!("server listening on {}", port);
             listener
         }
         Err(e) => {
@@ -39,7 +37,6 @@ async fn main() {
     loop {
         match listener.accept().await {
             Ok((socket, _)) => {
-                //println!("Accepted new connection");
                 let root_folder = root_folder.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(socket, root_folder).await {
@@ -131,9 +128,6 @@ async fn handle_get_request(root_folder: &Path, path: &str) -> String {
     }
 }
 
-
-
-
 async fn handle_post_subsets_request(_socket: &mut tokio::net::TcpStream, headers: &[&str]) -> String {
     let mut body = String::new();
     for header in headers {
@@ -202,7 +196,6 @@ async fn handle_post_request(root_folder: &Path, path: &str, headers: &[&str]) -
         "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string()
     }
 }
-
 
 fn guess_mime_type<P: AsRef<Path>>(path: P) -> &'static str {
     match path.as_ref().extension().and_then(|ext| ext.to_str()) {
@@ -275,3 +268,4 @@ fn parse_json(body: &str) -> Result<HashMap<String, String>, ()> {
         Err(())
     }
 }
+
