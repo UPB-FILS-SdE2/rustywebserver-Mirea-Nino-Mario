@@ -46,9 +46,9 @@ async fn handle_connection(mut stream: TcpStream, root: Arc<String>) -> Result<(
     let client_ip = stream.peer_addr()?.ip().to_string();
 
     if path.starts_with("/scripts/") {
-        handle_script(&mut stream, &root, path, &headers, &client_ip).await?;
+        handle_script(&mut stream, &root, &path, &headers, &client_ip).await?;
     } else {
-        handle_get(&mut stream, &root, path, &client_ip).await?;
+        handle_get(&mut stream, &root, &path, &client_ip).await?;
     }
 
     Ok(())
@@ -188,11 +188,13 @@ async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: 
     let output = command.output().await?;
 
     if output.status.success() {
-        let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let content = String::from_utf8_lossy(&output.stdout);
+        // Trim only trailing newlines, keeping any leading whitespace
+        let trimmed_content = content.trim_end_matches('\n');
         log_request(client_ip, path, 200, "OK");
-        send_script_response(stream, 200, "OK", "text/plain; charset=utf-8", &content).await?;
+        send_script_response(stream, 200, "OK", "text/plain; charset=utf-8", trimmed_content).await?;
     } else {
-        let error_message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let error_message = String::from_utf8_lossy(&output.stderr);
         log_request(client_ip, path, 500, "Internal Server Error");
         send_script_response(stream, 500, "Internal Server Error", "text/plain; charset=utf-8", &error_message).await?;
     }
