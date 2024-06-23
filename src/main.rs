@@ -23,9 +23,9 @@ async fn main() {
 
     let root_folder = PathBuf::from(&args[2]);
 
-    let listener = match TcpListener::bind(("127.0.0.1", port)).await {
+    let listener = match TcpListener::bind("127.0.0.1:8000").await {
         Ok(listener) => {
-            println!("Server listening on 127.0.0.1:{}", port);
+            println!("Server listening on 0.0.0.0:{}", port);
             listener
         }
         Err(e) => {
