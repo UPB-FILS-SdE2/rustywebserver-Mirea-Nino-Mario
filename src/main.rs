@@ -84,19 +84,19 @@ fn process_request_line(request_line: &str) -> (&str, &str, &str) {
 
 async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
     let file_path = format!("{}{}", root, path);
-    let path = Path::new(&file_path);
+    let full_path = Path::new(&file_path);
 
-    if !path.starts_with(root) {
+    if !full_path.starts_with(root) {
         log_request(client_ip, path, 403, "Forbidden");
         send_response(stream, 403, "Forbidden", "text/plain; charset=utf-8", "Access denied").await?;
         return Ok(());
     }
 
-    if path.is_dir() {
-        handle_directory_listing(stream, path, client_ip).await?;
-    } else if path.is_file() {
-        let content = fs::read(path).await?;
-        let content_type = get_content_type(path);
+    if full_path.is_dir() {
+        handle_directory_listing(stream, full_path, path, client_ip).await?;
+    } else if full_path.is_file() {
+        let content = fs::read(full_path).await?;
+        let content_type = get_content_type(full_path);
         log_request(client_ip, path, 200, "OK");
         send_response(stream, 200, "OK", &content_type, &String::from_utf8_lossy(&content)).await?;
     } else {
@@ -107,12 +107,12 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
     Ok(())
 }
 
-async fn handle_directory_listing(stream: &mut TcpStream, path: &Path, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_directory_listing(stream: &mut TcpStream, full_path: &Path, display_path: &str, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut html = String::from("<html><h1>Directory Listing</h1><ul>");
 
     html.push_str("<li><a href=\"..\">..</a></li>");
 
-    let mut entries = fs::read_dir(path).await?;
+    let mut entries = fs::read_dir(full_path).await?;
     while let Some(entry) = entries.next_entry().await? {
         let file_name = entry.file_name();
         if let Some(name) = file_name.to_str() {
@@ -122,7 +122,7 @@ async fn handle_directory_listing(stream: &mut TcpStream, path: &Path, client_ip
 
     html.push_str("</ul></html>");
 
-    log_request(client_ip, path, 200, "OK");
+    log_request(client_ip, display_path, 200, "OK");
     send_response(stream, 200, "OK", "text/html; charset=utf-8", &html).await?;
 
     Ok(())
@@ -130,15 +130,15 @@ async fn handle_directory_listing(stream: &mut TcpStream, path: &Path, client_ip
 
 async fn handle_script(stream: &mut TcpStream, root: &str, method: &str, path: &str, headers: &HashMap<String, String>, message: &str, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
     let script_path = format!("{}{}", root, path);
-    let script_path = Path::new(&script_path);
+    let full_path = Path::new(&script_path);
 
-    if !script_path.starts_with(root) || !script_path.starts_with(format!("{}/scripts", root)) {
+    if !full_path.starts_with(root) || !path.starts_with("/scripts/") {
         log_request(client_ip, path, 403, "Forbidden");
         send_response(stream, 403, "Forbidden", "text/plain; charset=utf-8", "Access denied").await?;
         return Ok(());
     }
 
-    if !script_path.exists() || !script_path.is_file() {
+    if !full_path.exists() || !full_path.is_file() {
         log_request(client_ip, path, 404, "Not Found");
         send_response(stream, 404, "Not Found", "text/plain; charset=utf-8", "Script not found").await?;
         return Ok(());
@@ -202,7 +202,7 @@ fn get_content_type(path: &Path) -> String {
 
 async fn send_response(stream: &mut TcpStream, status_code: u32, status: &str, content_type: &str, message: &str) -> Result<(), Box<dyn std::error::Error>> {
     let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: closed\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status_code, status, content_type, message.len(), message
     );
     stream.write_all(response.as_bytes()).await?;
@@ -210,5 +210,5 @@ async fn send_response(stream: &mut TcpStream, status_code: u32, status: &str, c
 }
 
 fn log_request(client_ip: &str, path: impl AsRef<Path>, status_code: u32, status_text: &str) {
-    println!("$Request {} ${} -> {} ({})", client_ip, path.as_ref().display(), status_code, status_text);
+    println!("GET {} {} -> {} ({})", client_ip, path.as_ref().display(), status_code, status_text);
 }
