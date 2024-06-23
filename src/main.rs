@@ -8,15 +8,20 @@ use std::collections::HashMap;
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
-        eprintln!("Usage: {} ROOT_FOLDER USERNAME PASSWORD", args[0]);
+    if args.len() != 3 {
+        eprintln!("Usage: {} PORT ROOT_FOLDER", args[0]);
         return;
     }
 
-    let port: u16 = 8000;
-    let root_folder = PathBuf::from(&args[1]);
-    let username = args[2].clone();
-    let password = args[3].clone();
+    let port: u16 = match args[1].parse() {
+        Ok(port) => port,
+        Err(_) => {
+            eprintln!("Invalid port number: {}", args[1]);
+            return;
+        }
+    };
+
+    let root_folder = PathBuf::from(&args[2]);
 
     println!("Root folder: {:?}", root_folder.canonicalize().unwrap());
 
@@ -36,10 +41,8 @@ async fn main() {
             Ok((socket, _)) => {
                 println!("Accepted new connection");
                 let root_folder = root_folder.clone();
-                let username = username.clone();
-                let password = password.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(socket, root_folder, &username, &password).await {
+                    if let Err(e) = handle_client(socket, root_folder).await {
                         eprintln!("Failed to handle client: {}", e);
                     }
                 });
@@ -49,7 +52,7 @@ async fn main() {
     }
 }
 
-async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf, valid_user: &str, valid_pass: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = vec![0; 1024];
     let n = socket.read(&mut buffer).await?;
     if n == 0 {
@@ -63,30 +66,6 @@ async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf, 
         if parts.len() == 3 {
             let method = parts[0];
             let path = parts[1];
-
-            let mut authenticated = false;
-            for line in &mut lines {
-                if line.starts_with("Authorization: Basic ") {
-                    let base64_credentials = &line["Authorization: Basic ".len()..];
-                    if let Ok(decoded) = base64_decode(base64_credentials) {
-                        if let Ok(credentials) = String::from_utf8(decoded) {
-                            let mut creds = credentials.splitn(2, ':');
-                            if let (Some(user), Some(pass)) = (creds.next(), creds.next()) {
-                                if user == valid_user && pass == valid_pass {
-                                    authenticated = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !authenticated {
-                let response = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic\r\n\r\n";
-                socket.write_all(response.as_bytes()).await?;
-                return Ok(());
-            }
 
             let response = if method == "GET" {
                 handle_get_request(&root_folder, path).await
@@ -233,6 +212,7 @@ fn base64_decode(encoded: &str) -> Result<Vec<u8>, ()> {
     }
     Ok(buffer)
 }
+
 
 fn guess_mime_type<P: AsRef<Path>>(path: P) -> &'static str {
     match path.as_ref().extension().and_then(|ext| ext.to_str()) {
