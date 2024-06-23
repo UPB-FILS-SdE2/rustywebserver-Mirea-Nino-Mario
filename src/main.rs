@@ -32,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    
 }
 
 async fn handle_connection(mut stream: TcpStream, root: Arc<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -98,12 +99,22 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
         let content = fs::read(full_path).await?;
         let content_type = get_content_type(full_path);
         log_request(client_ip, path, 200, "OK");
-        send_response(stream, 200, "OK", &content_type, &String::from_utf8_lossy(&content)).await?;
+        send_binary_response(stream, 200, "OK", &content_type, &content).await?;
     } else {
         log_request(client_ip, path, 404, "Not Found");
         send_response(stream, 404, "Not Found", "text/plain; charset=utf-8", "File not found").await?;
     }
 
+    Ok(())
+}
+
+async fn send_binary_response(stream: &mut TcpStream, status_code: u32, status: &str, content_type: &str, content: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let headers = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: closed\r\n\r\n",
+        status_code, status, content_type, content.len()
+    );
+    stream.write_all(headers.as_bytes()).await?;
+    stream.write_all(content).await?;
     Ok(())
 }
 
