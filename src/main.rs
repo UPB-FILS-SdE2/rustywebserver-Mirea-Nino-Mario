@@ -4,9 +4,6 @@ use std::env;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
-use tokio::net::TcpStream;
-use std::fs::File;
-use std::io::Read;
 
 #[tokio::main]
 async fn main() {
@@ -55,65 +52,34 @@ async fn main() {
     }
 }
 
-async fn handle_client(mut socket: TcpStream, root_folder: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let mut buffer = [0; 1024];
+async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buffer = vec![0; 1024];
     let n = socket.read(&mut buffer).await?;
+    if n == 0 {
+        return Ok(());
+    }
 
     let request = String::from_utf8_lossy(&buffer[..n]);
-    let lines: Vec<&str> = request.split("\r\n").collect();
-    let request_line = lines[0];
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() != 3 {
-        return Err("Invalid HTTP request".into());
-    }
+    let mut lines = request.lines();
+    if let Some(request_line) = lines.next() {
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
+        if parts.len() == 3 {
+            let method = parts[0];
+            let path = parts[1];
 
-    let method = parts[0];
-    let path = parts[1];
+            let response = if method == "GET" {
+                handle_get_request(&root_folder, path).await
+            } else if method == "POST" && path == "/subsets" {
+                handle_post_subsets_request(&mut socket, &mut lines.collect::<Vec<&str>>()).await
+            } else {
+                handle_post_request(&root_folder, path, &mut lines.collect::<Vec<&str>>()).await
+            };
 
-    if method != "GET" {
-        return Err("Unsupported HTTP method".into());
-    }
-
-    let mut file_path = root_folder.clone();
-    file_path.push(&path[1..]); // Remove leading '/'
-
-    let response = if file_path.exists() && file_path.is_file() {
-        match File::open(&file_path) {
-            Ok(mut file) => {
-                let mut contents = Vec::new();
-                file.read_to_end(&mut contents)?;
-                let mime_type = get_mime_type(&file_path);
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    mime_type,
-                    contents.len(),
-                    String::from_utf8_lossy(&contents)
-                )
-            }
-            Err(_) => "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n".to_string(),
+            socket.write_all(response.as_bytes()).await?;
         }
-    } else {
-        "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_string()
-    };
-
-    socket.write_all(response.as_bytes()).await?;
-    socket.shutdown().await?;
+    }
     Ok(())
 }
-
-fn get_mime_type(file_path: &PathBuf) -> &'static str {
-    match file_path.extension().and_then(|s| s.to_str()) {
-        Some("txt") => "text/plain; charset=utf-8",
-        Some("html") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("png") => "image/png",
-        Some("zip") => "application/zip",
-        _ => "application/octet-stream",
-    }
-}
-
 
 async fn handle_get_request(root_folder: &Path, path: &str) -> String {
     let full_path = root_folder.join(path.trim_start_matches('/'));
@@ -125,10 +91,11 @@ async fn handle_get_request(root_folder: &Path, path: &str) -> String {
                     Ok(contents) => {
                         let mime_type = guess_mime_type(&full_path);
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             mime_type,
-                            contents.len()
-                        ) + &String::from_utf8_lossy(&contents)
+                            contents.len(),
+                            String::from_utf8_lossy(&contents)
+                        )
                     }
                     Err(_) => {
                         "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n500 Internal Server Error".to_string()
@@ -277,7 +244,6 @@ fn guess_mime_type<P: AsRef<Path>>(path: P) -> &'static str {
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
-        Some("zip") => "application/zip",
         _ => "application/octet-stream",
     }
 }
