@@ -88,12 +88,12 @@ async fn handle_get_request(root_folder: &Path, path: &str) -> String {
             Ok(contents) => {
                 let mime_type = guess_mime_type(&full_path);
                 format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n{}",
                     mime_type,
                     String::from_utf8_lossy(&contents)
                 )
             }
-            Err(_) => "HTTP/1.1 403 Forbidden\r\n\r\n403 Forbidden".to_string(),
+            Err(_) => "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n403 Forbidden".to_string(),
         }
     } else if full_path.is_dir() {
         let mut entries = tokio::fs::read_dir(&full_path).await.unwrap();
@@ -105,13 +105,14 @@ async fn handle_get_request(root_folder: &Path, path: &str) -> String {
         }
         body.push_str("</ul></html>");
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
             body
         )
     } else {
-        "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
+        "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404 Not Found".to_string()
     }
 }
+
 
 async fn handle_post_subsets_request(_socket: &mut tokio::net::TcpStream, headers: &[&str]) -> String {
     let mut body = String::new();
