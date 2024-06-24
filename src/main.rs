@@ -230,23 +230,9 @@ async fn handle_script(
 
     if output.status.success() {
         let content = String::from_utf8_lossy(&output.stdout);
-        let lines = content.lines();
-        
         let mut script_headers = HashMap::new();
-        let mut response_body = String::new();
-        let mut reading_body = false;
-        for line in lines {
-            if reading_body {
-                response_body.push_str(line);
-                response_body.push('\n');
-            } else if line.is_empty() {
-                reading_body = true;
-            } else if let Some((key, value)) = line.split_once(':') {
-                script_headers.insert(key.trim().to_string(), value.trim().to_string());
-            }
-        }
-        
-        let response_body = response_body.trim_end().to_string();
+        script_headers.insert("Content-Type".to_string(), "text/plain".to_string());
+        let response_body = content.trim_end().to_string();
         
         log_request(method, client_ip, path, 200, "OK");
         send_script_response(stream, 200, "OK", &script_headers, &response_body).await?;
@@ -260,6 +246,7 @@ async fn handle_script(
 
     Ok(())
 }
+
 
 
 async fn send_script_response(
