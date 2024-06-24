@@ -248,7 +248,7 @@ async fn handle_script(
 
         let response_body = response_body.trim_end().to_string();
         
-        log_request(method, client_ip, path, 200, "OK");
+        log_request(method, client_ip, parts[0], 200, "OK");
         send_script_response(stream, 200, "OK", &script_headers, &response_body).await?;
     } else {
         let error_message = "<html>500 Internal Server Error</html>";
