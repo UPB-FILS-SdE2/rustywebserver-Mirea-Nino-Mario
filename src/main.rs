@@ -101,7 +101,7 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
     let normalized_requested_path = match fs::canonicalize(&requested_path).await {
         Ok(p) => p,
         Err(_) => {
-            log_request(client_ip, path, 404, "Not Found");
+            log_request("GET", client_ip, path, 404, "Not Found");
             send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
             return Ok(());
         }
@@ -110,7 +110,7 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
     let normalized_root_path = fs::canonicalize(&root_path).await?;
 
     if !normalized_requested_path.starts_with(&normalized_root_path) {
-        log_request(client_ip, path, 403, "Forbidden");
+        log_request("GET", client_ip, path, 403, "Forbidden");
         send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
         return Ok(());
     }
@@ -123,23 +123,23 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
                 match fs::read(&normalized_requested_path).await {
                     Ok(content) => {
                         let content_type = get_content_type(&normalized_requested_path);
-                        log_request(client_ip, path, 200, "OK");
+                        log_request("GET", client_ip, path, 200, "OK");
                         send_binary_response(stream, 200, "OK", &content_type, &content).await?;
                     },
                     Err(e) => {
                         eprintln!("Error reading file: {:?}", e);
-                        log_request(client_ip, path, 403, "Forbidden");
+                        log_request("GET",client_ip, path, 403, "Forbidden");
                         send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
                     }
                 }
             } else {
-                log_request(client_ip, path, 404, "Not Found");
+                log_request("GET",client_ip, path, 404, "Not Found");
                 send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
             }
         },
         Err(e) => {
             eprintln!("Error getting metadata: {:?}", e);
-            log_request(client_ip, path, 404, "Not Found");
+            log_request("GET",client_ip, path, 404, "Not Found");
             send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
         }
     }
@@ -172,7 +172,7 @@ async fn handle_directory_listing(stream: &mut TcpStream, full_path: &Path, disp
 
     html.push_str("</ul></html>");
 
-    log_request(client_ip, display_path, 200, "OK");
+    log_request("GET",client_ip, display_path, 200, "OK");
     send_response(stream, 200, "OK", "text/html; charset=utf-8", &html).await?;
 
     Ok(())
@@ -191,7 +191,7 @@ async fn handle_script(
     let script_path = Path::new(&script_path);
 
     if !script_path.exists() || !script_path.is_file() {
-        log_request(client_ip, path, 404, "Not Found");
+        log_request(method,client_ip, path, 404, "Not Found");
         send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
         return Ok(());
     }
@@ -237,11 +237,11 @@ async fn handle_script(
         
         let response_body = response_body.trim_end().to_string();
         
-        log_request(client_ip, path, 200, "OK");
+        log_request(method,client_ip, path, 200, "OK");
         send_script_response(stream, 200, "OK", &script_headers, &response_body).await?;
     } else {
         let error_message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        log_request(client_ip, path, 500, "Internal Server Error");
+        log_request(method,client_ip, path, 500, "Internal Server Error");
         let mut error_headers = HashMap::new();
         error_headers.insert("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
         send_script_response(stream, 500, "Internal Server Error", &error_headers, &error_message).await?;
@@ -304,6 +304,6 @@ async fn send_response(stream: &mut TcpStream, status_code: u32, status: &str, c
     Ok(())
 }
 
-fn log_request(client_ip: &str, path: &str, status_code: u32, status_text: &str) {
-    println!("{} {} -> {} ({})", client_ip, path, status_code, status_text);
+fn log_request(method: &str, client_ip: &str, path: &str, status_code: u32, status_text: &str) {
+    println!("{} {} {} -> {} ({})", method, client_ip, path, status_code, status_text);
 }
