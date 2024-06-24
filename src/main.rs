@@ -39,15 +39,29 @@ async fn handle_connection(mut stream: TcpStream, root: Arc<String>) -> Result<(
     let mut buffer = [0; 8192];
     let size = stream.read(&mut buffer).await?;
     let request = String::from_utf8_lossy(&buffer[..size]);
-    let (request_line, headers, _) = parse_request(&request);
-    let (_, path, _) = process_request_line(&request_line);
+    let (request_line, headers, body) = parse_request(&request);
+    let (method, path, _) = process_request_line(&request_line);
 
     let client_ip = stream.peer_addr()?.ip().to_string();
 
-    if path.starts_with("/scripts/") {
-        handle_script(&mut stream, &root, &path, &headers, &client_ip).await?;
-    } else {
-        handle_get(&mut stream, &root, &path, &client_ip).await?;
+    match method {
+        "GET" => {
+            if path.starts_with("/scripts/") {
+                handle_script(&mut stream, &root, &path, &headers, &client_ip, "GET", &body).await?;
+            } else {
+                handle_get(&mut stream, &root, &path, &client_ip).await?;
+            }
+        },
+        "POST" => {
+            if path.starts_with("/scripts/") {
+                handle_script(&mut stream, &root, &path, &headers, &client_ip, "POST", &body).await?;
+            } else {
+                send_response(&mut stream, 405, "Method Not Allowed", "text/html; charset=utf-8", "<html>405 Method Not Allowed</html>").await?;
+            }
+        },
+        _ => {
+            send_response(&mut stream, 405, "Method Not Allowed", "text/html; charset=utf-8", "<html>405 Method Not Allowed</html>").await?;
+        }
     }
 
     Ok(())
@@ -164,7 +178,15 @@ async fn handle_directory_listing(stream: &mut TcpStream, full_path: &Path, disp
     Ok(())
 }
 
-async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: &HashMap<String, String>, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_script(
+    stream: &mut TcpStream,
+    root: &str,
+    path: &str,
+    headers: &HashMap<String, String>,
+    client_ip: &str,
+    method: &str,
+    body: &str
+) -> Result<(), Box<dyn std::error::Error>> {
     let script_path = format!("{}/scripts/{}", root, path.trim_start_matches("/scripts/"));
     let script_path = Path::new(&script_path);
 
@@ -177,24 +199,35 @@ async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: 
     let mut command = Command::new(script_path);
     command.env_clear()
            .envs(headers)
-           .env("METHOD", "GET")
+           .env("METHOD", method)
            .env("PATH", path)
            .stdout(Stdio::piped())
            .stderr(Stdio::piped());
 
-    let output = command.output().await?;
+    if method == "POST" {
+        command.stdin(Stdio::piped());
+    }
+
+    let mut child = command.spawn()?;
+    if method == "POST" {
+        if let Some(mut stdin) = child.stdin.take() {
+            tokio::io::copy(&mut body.as_bytes(), &mut stdin).await?;
+        }
+    }
+
+    let output = child.wait_with_output().await?;
 
     if output.status.success() {
         let content = String::from_utf8_lossy(&output.stdout);
         let lines = content.lines();
         
         let mut script_headers = HashMap::new();
-        let mut body = String::new();
+        let mut response_body = String::new();
         let mut reading_body = false;
         for line in lines {
             if reading_body {
-                body.push_str(line);
-                body.push('\n');
+                response_body.push_str(line);
+                response_body.push('\n');
             } else if line.is_empty() {
                 reading_body = true;
             } else if let Some((key, value)) = line.split_once(':') {
@@ -202,10 +235,10 @@ async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: 
             }
         }
         
-        let body = body.trim_end().to_string();
+        let response_body = response_body.trim_end().to_string();
         
         log_request(client_ip, path, 200, "OK");
-        send_script_response(stream, 200, "OK", &script_headers, &body).await?;
+        send_script_response(stream, 200, "OK", &script_headers, &response_body).await?;
     } else {
         let error_message = String::from_utf8_lossy(&output.stderr).trim().to_string();
         log_request(client_ip, path, 500, "Internal Server Error");
@@ -272,5 +305,5 @@ async fn send_response(stream: &mut TcpStream, status_code: u32, status: &str, c
 }
 
 fn log_request(client_ip: &str, path: &str, status_code: u32, status_text: &str) {
-    println!("GET {} {} -> {} ({})", client_ip, path, status_code, status_text);
+    println!("{} {} -> {} ({})", client_ip, path, status_code, status_text);
 }
