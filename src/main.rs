@@ -187,10 +187,10 @@ async fn handle_script(
     method: &str,
     body: &str
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Separate the script path and query parameters
+    // Split the path to separate the script path and the query parameters
     let parts: Vec<&str> = path.splitn(2, '?').collect();
-    let script_path = format!("{}/scripts/{}", root, parts[0].trim_start_matches("/scripts/"));
-    let script_path = Path::new(&script_path);
+    let script_path_str = parts[0].trim_start_matches("/scripts/");
+    let script_path = Path::new(root).join("scripts").join(script_path_str);
 
     if !script_path.exists() || !script_path.is_file() {
         log_request(method, client_ip, path, 404, "Not Found");
@@ -206,13 +206,13 @@ async fn handle_script(
            .stdout(Stdio::piped())
            .stderr(Stdio::piped());
 
-    // Pass query parameters as environment variables
+    // Pass query parameters as environment variables if available
     if parts.len() > 1 {
-        for (i, query) in parts[1].split('&').enumerate() {
-            if let Some((key, value)) = query.split_once('=') {
+        parts[1].split('&').for_each(|param| {
+            if let Some((key, value)) = param.split_once('=') {
                 command.env(format!("QUERY_{}", key), value);
             }
-        }
+        });
     }
 
     if method == "POST" {
@@ -230,9 +230,23 @@ async fn handle_script(
 
     if output.status.success() {
         let content = String::from_utf8_lossy(&output.stdout);
+        let lines = content.lines();
+        
         let mut script_headers = HashMap::new();
-        script_headers.insert("Content-Type".to_string(), "text/plain".to_string());
-        let response_body = content.trim_end().to_string();
+        let mut response_body = String::new();
+        let mut reading_body = false;
+        for line in lines {
+            if reading_body {
+                response_body.push_str(line);
+                response_body.push('\n');
+            } else if line.is_empty() {
+                reading_body = true;
+            } else if let Some((key, value)) = line.split_once(':') {
+                script_headers.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+
+        let response_body = response_body.trim_end().to_string();
         
         log_request(method, client_ip, path, 200, "OK");
         send_script_response(stream, 200, "OK", &script_headers, &response_body).await?;
