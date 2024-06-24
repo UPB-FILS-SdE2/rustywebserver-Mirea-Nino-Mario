@@ -1,174 +1,153 @@
 [![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-24ddc0f5d75046c5622901739e7c5dd533143b0c8e959d652212380cedb1ea36.svg)](https://classroom.github.com/a/TXciPqtn)
 # Rustwebserver
 
-## Descriere
-Acest proiect implementează un server web simplu utilizând Rust și biblioteca Tokio pentru programare asincronă. Serverul poate răspunde la cereri HTTP GET pentru a servi fișiere și cereri HTTP POST pentru a executa scripturi.
+## Descriere generală
+Acest program implementează un web server asincron folosind biblioteca Tokio din Rust. Serverul este capabil să gestioneze cereri HTTP GET și POST și poate servi fișiere dintr-un director specificat sau rula scripturi CGI pentru cererile către /scripts/.
 
-## Funcționalități
-Servirea fișierelor statice dintr-un director specificat.
-Executarea scripturilor dintr-un subdirector specific (/scripts).
-Gestionarea cererilor HTTP asincrone.
-## Dependențe
-Proiectul utilizează biblioteca tokio pentru suport asincron. În Cargo.toml:
+## Cum este implementat
+Programul este implementat în Rust, folosind Tokio pentru programarea asincronă. Acesta constă dintr-o funcție principală main care inițializează serverul și mai multe funcții auxiliare pentru a gestiona cererile HTTP și a răspunde corespunzător.
 
-toml
-```
-[dependencies]
-tokio = { version = "1", features = ["full"] }
-```
-## Structura Proiectului
-main.rs: Fișierul principal care conține codul serverului web.
-
-## Cum Funcționează
-### Funcția Principală
-Funcția main inițializează serverul și începe să asculte pe un port specificat. De asemenea, verifică argumentele din linia de comandă pentru port și directorul rădăcină.
+## Structura Codului
+### 1.Biblioteci importate:
 
 rust
-```
+---
+use tokio::net::{TcpListener, TcpStream};
+use tokio::fs;
+use tokio::process::Command;
+use std::process::Stdio;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::sync::Arc;
+---
+### 2.Funcția principală main:
+
+Aceasta inițializează serverul, verifică argumentele de linie de comandă, și configurează TcpListener pentru a asculta conexiunile pe un anumit port.
+Folosește un buclă infinită pentru a accepta conexiuni și creează un nou task pentru fiecare conexiune primită folosind tokio::spawn.
+rust
+---
 #[tokio::main]
-async fn main() {
-    let args: Vec<String> = env::args().collect();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
     if args.len() != 3 {
-        eprintln!("Usage: {} PORT ROOT_FOLDER", args[0]);
-        return;
+        eprintln!("Usage: {} <PORT> <ROOT_FOLDER>", args[0]);
+        std::process::exit(1);
     }
 
-    let port: u16 = args[1].parse().expect("Invalid port number");
-    let root_folder = PathBuf::from(&args[2]);
+    let port = &args[1];
+    let root_folder = &args[2];
 
-    println!("Root folder: {:?}", root_folder.canonicalize().unwrap());
+    println!("Root folder: {}", fs::canonicalize(root_folder).await?.display());
     println!("Server listening on 0.0.0.0:{}", port);
 
-    let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    let root = Arc::new(root_folder.to_string());
 
     loop {
-        let (socket, _) = listener.accept().await.unwrap();
-        let root_folder = root_folder.clone();
+        let (stream, _) = listener.accept().await?;
+        let root = Arc::clone(&root);
         tokio::spawn(async move {
-            handle_client(socket, root_folder).await;
+            if let Err(e) = handle_connection(stream, root).await {
+                eprintln!("Error handling connection: {}", e);
+            }
         });
     }
 }
-```
-### Gestionarea Cererilor
-Funcția handle_client gestionează fiecare conexiune client. Citește datele de la client și procesează cererea HTTP.
+---
+### 3.Funcția handle_connection:
 
+Aceasta gestionează fiecare conexiune, citind cererea HTTP și delegând răspunsul corespunzător în funcție de metoda HTTP (GET sau POST) și de calea solicitată.
 rust
-```
-async fn handle_client(mut socket: tokio::net::TcpStream, root_folder: PathBuf) {
-    let mut buffer = [0; 1024];
-    if let Ok(n) = socket.read(&mut buffer).await {
-        if n == 0 {
-            return;
-        }
+---
+async fn handle_connection(mut stream: TcpStream, root: Arc<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buffer = [0; 8192];
+    let size = stream.read(&mut buffer).await?;
+    let request = String::from_utf8_lossy(&buffer[..size]);
+    let (request_line, headers, body) = parse_request(&request);
+    let (method, path, _) = process_request_line(&request_line);
 
-        let request = String::from_utf8_lossy(&buffer[..n]);
-        let mut lines = request.lines();
-        if let Some(request_line) = lines.next() {
-            let parts: Vec<&str> = request_line.split_whitespace().collect();
-            if parts.len() == 3 {
-                let method = parts[0];
-                let path = parts[1];
-                let full_path = root_folder.join(path.trim_start_matches('/'));
+    let client_ip = stream.peer_addr()?.ip().to_string();
 
-                let response = if method == "GET" {
-                    handle_get_request(&full_path).await
-                } else {
-                    handle_post_request(&full_path, &mut lines.collect::<Vec<&str>>()).await
-                };
-
-                socket.write_all(response.as_bytes()).await.unwrap();
+    match method {
+        "GET" => {
+            if path.starts_with("/scripts/") {
+                handle_script(&mut stream, &root, &path, &headers, &client_ip, "GET", &body).await?;
+            } else {
+                handle_get(&mut stream, &root, &path, &client_ip).await?;
             }
+        },
+        "POST" => {
+            if path.starts_with("/scripts/") {
+                handle_script(&mut stream, &root, &path, &headers, &client_ip, "POST", &body).await?;
+            } else {
+                send_response(&mut stream, 405, "Method Not Allowed", "text/html; charset=utf-8", "<html>405 Method Not Allowed</html>").await?;
+            }
+        },
+        _ => {
+            send_response(&mut stream, 405, "Method Not Allowed", "text/html; charset=utf-8", "<html>405 Method Not Allowed</html>").await?;
         }
     }
-}
-```
-### Gestionarea Cererilor GET
-Funcția handle_get_request gestionează cererile GET pentru a servi fișiere statice sau a lista conținutul unui director.
 
-rust
-```
-async fn handle_get_request(path: &Path) -> String {
-    if path.is_file() {
-        match fs::read(path) {
-            Ok(contents) => {
-                let mime_type = guess_mime_type(path);
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\r\n{}",
-                    mime_type,
-                    String::from_utf8_lossy(&contents)
-                )
-            }
-            Err(_) => "HTTP/1.1 403 Forbidden\r\n\r\n403 Forbidden".to_string(),
-        }
-    } else if path.is_dir() {
-        let entries = fs::read_dir(path).unwrap();
-        let mut body = String::new();
-        body.push_str("<html><h1>Directory Listing</h1><ul>");
-        for entry in entries {
-            let entry = entry.unwrap();
-            let name = entry.file_name().into_string().unwrap();
-            body.push_str(&format!("<li><a href=\"/{0}\">{0}</a></li>", name));
-        }
-        body.push_str("</ul></html>");
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
-            body
-        )
-    } else {
-        "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found".to_string()
-    }
+    Ok(())
 }
-```
-### Gestionarea Cererilor POST
-Funcția handle_post_request gestionează cererile POST pentru a executa scripturi din directorul /scripts.
+---
+### 4.Funcțiile auxiliare:
 
+parse_request și process_request_line: Analizează cererea HTTP pentru a obține linia de cerere, anteturile și corpul cererii.
+handle_get: Gestionează cererile GET, verificând dacă calea solicită un script sau un fișier/dosar și răspunzând corespunzător.
+handle_script: Rulează scripturi CGI, setând variabilele de mediu corespunzătoare și capturând output-ul.
+send_response și send_binary_response: Trimit răspunsuri HTTP text sau binare către client.
+handle_directory_listing: Generează și trimite listarea directorului solicitat.
+get_content_type: Determină tipul de conținut al fișierului solicitat.
+log_request: Loghează detalii despre cererea procesată.
 rust
-```
-async fn handle_post_request(path: &Path, headers: &[&str]) -> String {
-    if path.starts_with("/scripts") && path.is_file() && path.metadata().unwrap().permissions().mode() & 0o111 != 0 {
-        let mut command = Command::new(path);
-        for header in headers {
-            if let Some((key, value)) = header.split_once(": ") {
-                command.env(key, value);
-            }
-        }
-        match command.output().await {
-            Ok(output) => {
-                if output.status.success() {
-                    format!(
-                        "HTTP/1.1 200 OK\r\n\r\n{}",
-                        String::from_utf8_lossy(&output.stdout)
-                    )
-                } else {
-                    format!(
-                        "HTTP/1.1 500 Internal Server Error\r\n\r\n{}",
-                        String::from_utf8_lossy(&output.stderr)
-                    )
-                }
-            }
-            Err(_) => "HTTP/1.1 500 Internal Server Error\r\n\r\n500 Internal Server Error".to_string(),
-        }
-    } else {
-        "HTTP/1.1 403 Forbidden\r\n\r\n403 Forbidden".to_string()
-    }
-}
-```
-### Determinarea Tipului de Mime
-Funcția guess_mime_type determină tipul MIME al unui fișier pe baza extensiei sale.
+---
+fn parse_request(request: &str) -> (String, HashMap<String, String>, String) { ... }
 
-rust
-```
-fn guess_mime_type(path: &Path) -> &'static str {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("png") => "image/png",
-        Some("jpeg") | Some("jpg") => "image/jpeg",
-        Some("zip") => "application/zip",
-        Some("txt") => "text/plain; charset=utf-8",
-        _ => "application/octet-stream",
-    }
-}
-```
+fn process_request_line(request_line: &str) -> (&str, &str, &str) { ... }
+
+async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> { ... }
+
+async fn send_binary_response(stream: &mut TcpStream, status_code: u32, status: &str, content_type: &str, content: &[u8]) -> Result<(), Box<dyn std::error::Error>> { ... }
+
+async fn handle_directory_listing(stream: &mut TcpStream, full_path: &Path, display_path: &str, client_ip: &str) -> Result<(), Box<dyn std::error::Error>> { ... }
+
+async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: &HashMap<String, String>, client_ip: &str, method: &str, body: &str) -> Result<(), Box<dyn std::error::Error>> { ... }
+
+async fn send_script_response(stream: &mut TcpStream, status_code: u32, status: &str, script_headers: &HashMap<String, String>, body: &str) -> Result<(), Box<dyn std::error::Error>> { ... }
+
+fn get_content_type(path: &Path) -> String { ... }
+
+async fn send_response(stream: &mut TcpStream, status_code: u32, status: &str, content_type: &str, message: &str) -> Result<(), Box<dyn std::error::Error>> { ... }
+
+fn log_request(method: &str, client_ip: &str, path: &str, status_code: u32, status_text: &str) { ... }
+---
+## Cum funcționează
+### 1.Inițializare:
+
+Serverul este pornit cu cargo run <PORT> <ROOT_FOLDER>, unde <PORT> este portul pe care serverul va asculta conexiunile, iar <ROOT_FOLDER> este directorul rădăcină din care se vor servi fișierele.
+### 2.Acceptarea conexiunilor:
+
+Serverul ascultă pe adresa 0.0.0.0:<PORT> și acceptă conexiuni noi în buclă.
+Pentru fiecare conexiune, se pornește un nou task pentru a gestiona cererea respectivă.
+### 3.Procesarea cererilor:
+
+Cererea HTTP este citită și analizată pentru a extrage linia de cerere, anteturile și corpul.
+În funcție de metoda HTTP (GET sau POST) și de calea solicitată, serverul răspunde corespunzător:
+GET: Dacă calea începe cu /scripts/, se rulează scriptul CGI; altfel, se servește fișierul sau se listează conținutul directorului.
+POST: Dacă calea începe cu /scripts/, se rulează scriptul CGI; altfel, se răspunde cu "405 Method Not Allowed".
+### 4.Rularea scripturilor CGI:
+
+Scripturile sunt rulate folosind tokio::process::Command, cu variabilele de mediu setate pe baza anteturilor cererii și a altor informații relevante.
+Rezultatul scriptului este capturat și trimis înapoi clientului.
+### 5.Servirea fișierelor și directoarelor:
+
+Fișierele sunt citite asincron și trimise înapoi clientului cu tipul de conținut corespunzător.
+Directoarele sunt listate și conținutul generat este trimis ca răspuns HTML.
+### 6.Logare și trimitere răspunsuri:
+
+Fiecare cerere este logată cu detalii despre metodă, IP-ul clientului, calea solicitată și codul de status al răspunsului.
+Răspunsurile sunt formate și trimise clientului, fie ca text HTML, fie ca conținut binar, în funcție de cerere și de resursele solicitate.
+## Concluzie
+Acest web server asincron în Rust folosește Tokio pentru a gestiona eficient cererile HTTP și a servi fișiere sau a rula scripturi CGI. Documentația de mai sus oferă o privire de ansamblu asupra implementării și funcționării sale, explicând principalele componente și funcționalități ale codului.

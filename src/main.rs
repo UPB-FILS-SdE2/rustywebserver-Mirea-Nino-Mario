@@ -187,7 +187,6 @@ async fn handle_script(
     method: &str,
     body: &str
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Split the path to separate the script path and the query parameters
     let parts: Vec<&str> = path.splitn(2, '?').collect();
     let script_path_str = parts[0].trim_start_matches("/scripts/");
     let script_path = Path::new(root).join("scripts").join(script_path_str);
@@ -206,7 +205,6 @@ async fn handle_script(
            .stdout(Stdio::piped())
            .stderr(Stdio::piped());
 
-    // Pass query parameters as environment variables if available
     if parts.len() > 1 {
         parts[1].split('&').for_each(|param| {
             if let Some((key, value)) = param.split_once('=') {
