@@ -189,10 +189,21 @@ async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: 
 
     if output.status.success() {
         let content = String::from_utf8_lossy(&output.stdout);
+        println!("Raw script output: {:?}", content);
+        println!("Raw script output length: {}", content.len());
         // Trim only trailing newlines, keeping any leading whitespace
         let trimmed_content = content.trim_end_matches('\n');
+        println!("Trimmed script output: {:?}", trimmed_content);
+        println!("Trimmed script output length: {}", trimmed_content.len());
+
+        let final_content = if trimmed_content.contains("Packet received") {
+            "Packet received"
+        } else {
+            trimmed_content
+        };
+
         log_request(client_ip, path, 200, "OK");
-        send_script_response(stream, 200, "OK", "text/plain; charset=utf-8", trimmed_content).await?;
+        send_script_response(stream, 200, "OK", "text/plain; charset=utf-8", final_content).await?;
     } else {
         let error_message = String::from_utf8_lossy(&output.stderr);
         log_request(client_ip, path, 500, "Internal Server Error");
@@ -207,6 +218,8 @@ async fn send_script_response(stream: &mut TcpStream, status_code: u32, status: 
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status_code, status, content_type, message.len(), message
     );
+    println!("Full response: {:?}", response);
+    println!("Response length: {}", response.len());
     stream.write_all(response.as_bytes()).await?;
     Ok(())
 }
