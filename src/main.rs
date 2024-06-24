@@ -191,7 +191,7 @@ async fn handle_script(
     let script_path = Path::new(&script_path);
 
     if !script_path.exists() || !script_path.is_file() {
-        log_request(method, client_ip, path, 404, "Not Found");
+        log_request(method,client_ip, path, 404, "Not Found");
         send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
         return Ok(());
     }
@@ -219,12 +219,29 @@ async fn handle_script(
 
     if output.status.success() {
         let content = String::from_utf8_lossy(&output.stdout);
-        log_request(method, client_ip, path, 200, "OK");
-        let headers = HashMap::from([("Content-Type".to_string(), "text/plain".to_string())]);
-        send_script_response(stream, 200, "OK", &headers, &content).await?;
+        let lines = content.lines();
+        
+        let mut script_headers = HashMap::new();
+        let mut response_body = String::new();
+        let mut reading_body = false;
+        for line in lines {
+            if reading_body {
+                response_body.push_str(line);
+                response_body.push('\n');
+            } else if line.is_empty() {
+                reading_body = true;
+            } else if let Some((key, value)) = line.split_once(':') {
+                script_headers.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+        
+        let response_body = response_body.trim_end().to_string();
+        
+        log_request(method,client_ip, path, 200, "OK");
+        send_script_response(stream, 200, "OK", &script_headers, &response_body).await?;
     } else {
         let error_message = "<html>500 Internal Server Error</html>";
-        log_request(method, client_ip, path, 500, "Internal Server Error");
+        log_request(method,client_ip, path, 500, "Internal Server Error");
         let mut error_headers = HashMap::new();
         error_headers.insert("Content-Type".to_string(), "text/html; charset=utf-8".to_string());
         send_script_response(stream, 500, "Internal Server Error", &error_headers, error_message).await?;
@@ -232,7 +249,6 @@ async fn handle_script(
 
     Ok(())
 }
-
 
 async fn send_script_response(
     stream: &mut TcpStream,
@@ -265,7 +281,6 @@ async fn send_script_response(
     stream.write_all(response.as_bytes()).await?;
     Ok(())
 }
-
 
 fn get_content_type(path: &Path) -> String {
     match path.extension().and_then(std::ffi::OsStr::to_str) {
