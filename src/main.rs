@@ -187,11 +187,13 @@ async fn handle_script(
     method: &str,
     body: &str
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let script_path = format!("{}/scripts/{}", root, path.trim_start_matches("/scripts/"));
+    // Separate the script path and query parameters
+    let parts: Vec<&str> = path.splitn(2, '?').collect();
+    let script_path = format!("{}/scripts/{}", root, parts[0].trim_start_matches("/scripts/"));
     let script_path = Path::new(&script_path);
 
     if !script_path.exists() || !script_path.is_file() {
-        log_request(method,client_ip, path, 404, "Not Found");
+        log_request(method, client_ip, path, 404, "Not Found");
         send_response(stream, 404, "Not Found", "text/html; charset=utf-8", "<html>404 Not Found</html>").await?;
         return Ok(());
     }
@@ -203,6 +205,15 @@ async fn handle_script(
            .env("PATH", path)
            .stdout(Stdio::piped())
            .stderr(Stdio::piped());
+
+    // Pass query parameters as environment variables
+    if parts.len() > 1 {
+        for (i, query) in parts[1].split('&').enumerate() {
+            if let Some((key, value)) = query.split_once('=') {
+                command.env(format!("QUERY_{}", key), value);
+            }
+        }
+    }
 
     if method == "POST" {
         command.stdin(Stdio::piped());
@@ -237,11 +248,11 @@ async fn handle_script(
         
         let response_body = response_body.trim_end().to_string();
         
-        log_request(method,client_ip, path, 200, "OK");
+        log_request(method, client_ip, path, 200, "OK");
         send_script_response(stream, 200, "OK", &script_headers, &response_body).await?;
     } else {
         let error_message = "<html>500 Internal Server Error</html>";
-        log_request(method,client_ip, path, 500, "Internal Server Error");
+        log_request(method, client_ip, path, 500, "Internal Server Error");
         let mut error_headers = HashMap::new();
         error_headers.insert("Content-Type".to_string(), "text/html; charset=utf-8".to_string());
         send_script_response(stream, 500, "Internal Server Error", &error_headers, error_message).await?;
@@ -249,6 +260,7 @@ async fn handle_script(
 
     Ok(())
 }
+
 
 async fn send_script_response(
     stream: &mut TcpStream,
