@@ -189,37 +189,54 @@ async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: 
 
     if output.status.success() {
         let content = String::from_utf8_lossy(&output.stdout);
-        println!("Raw script output: {:?}", content);
-        println!("Raw script output length: {}", content.len());
-        // Trim only trailing newlines, keeping any leading whitespace
-        let trimmed_content = content.trim_end_matches('\n');
-        println!("Trimmed script output: {:?}", trimmed_content);
-        println!("Trimmed script output length: {}", trimmed_content.len());
-
-        let final_content = if trimmed_content.contains("Packet received") {
-            "Packet received"
-        } else {
-            trimmed_content
-        };
-
+        let mut lines = content.lines();
+        
+        // Parse headers from script output
+        let mut script_headers = HashMap::new();
+        while let Some(line) = lines.next() {
+            if line.is_empty() {
+                break;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                script_headers.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+        
+        // The rest is the body
+        let body = lines.collect::<Vec<&str>>().join("\n").trim_end().to_string();
+        
         log_request(client_ip, path, 200, "OK");
-        send_script_response(stream, 200, "OK", "text/plain; charset=utf-8", final_content).await?;
+        send_script_response(stream, 200, "OK", &script_headers, &body).await?;
     } else {
-        let error_message = String::from_utf8_lossy(&output.stderr);
+        let error_message = String::from_utf8_lossy(&output.stderr).trim().to_string();
         log_request(client_ip, path, 500, "Internal Server Error");
-        send_script_response(stream, 500, "Internal Server Error", "text/plain; charset=utf-8", &error_message).await?;
+        let mut error_headers = HashMap::new();
+        error_headers.insert("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
+        send_script_response(stream, 500, "Internal Server Error", &error_headers, &error_message).await?;
     }
 
     Ok(())
 }
 
-async fn send_script_response(stream: &mut TcpStream, status_code: u32, status: &str, content_type: &str, message: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status_code, status, content_type, message.len(), message
+async fn send_script_response(stream: &mut TcpStream, status_code: u32, status: &str, script_headers: &HashMap<String, String>, body: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut response = format!(
+        "HTTP/1.1 {} {}\r\n",
+        status_code, status
     );
+
+    // Add script-provided headers
+    for (key, value) in script_headers {
+        response.push_str(&format!("{}: {}\r\n", key, value));
+    }
+
+    // Add Content-Length and Connection headers
+    response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    response.push_str("Connection: close\r\n\r\n");
+    response.push_str(body);
+
     println!("Full response: {:?}", response);
     println!("Response length: {}", response.len());
+    
     stream.write_all(response.as_bytes()).await?;
     Ok(())
 }
