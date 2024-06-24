@@ -252,9 +252,6 @@ async fn send_script_response(
     // Add Connection header
     response.push_str("Connection: close\r\n\r\n");
     response.push_str(body);
-
-    println!("Full response: {:?}", response);
-    println!("Response length: {}", response.len());
     
     stream.write_all(response.as_bytes()).await?;
     Ok(())
