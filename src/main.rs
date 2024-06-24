@@ -33,7 +33,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-    
 }
 
 async fn handle_connection(mut stream: TcpStream, root: Arc<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -85,7 +84,6 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
     let root_path = PathBuf::from(root);
     let requested_path = root_path.join(path.trim_start_matches('/'));
     
-    // Normalize both paths to compare them properly
     let normalized_requested_path = match fs::canonicalize(&requested_path).await {
         Ok(p) => p,
         Err(_) => {
@@ -97,7 +95,6 @@ async fn handle_get(stream: &mut TcpStream, root: &str, path: &str, client_ip: &
     
     let normalized_root_path = fs::canonicalize(&root_path).await?;
 
-    // Check if the normalized requested path starts with the normalized root path
     if !normalized_requested_path.starts_with(&normalized_root_path) {
         log_request(client_ip, path, 403, "Forbidden");
         send_response(stream, 403, "Forbidden", "text/html; charset=utf-8", "<html>403 Forbidden</html>").await?;
@@ -191,7 +188,6 @@ async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: 
         let content = String::from_utf8_lossy(&output.stdout);
         let lines = content.lines();
         
-        // Parse headers from script output
         let mut script_headers = HashMap::new();
         let mut body = String::new();
         let mut reading_body = false;
@@ -206,7 +202,6 @@ async fn handle_script(stream: &mut TcpStream, root: &str, path: &str, headers: 
             }
         }
         
-        // Trim any trailing newline from the body
         let body = body.trim_end().to_string();
         
         log_request(client_ip, path, 200, "OK");
@@ -236,7 +231,6 @@ async fn send_script_response(
 
     let mut content_length_set = false;
 
-    // Add script-provided headers
     for (key, value) in script_headers {
         if key.to_lowercase() == "content-length" {
             content_length_set = true;
@@ -244,12 +238,10 @@ async fn send_script_response(
         response.push_str(&format!("{}: {}\r\n", key, value));
     }
 
-    // Add Content-Length if not already set
     if !content_length_set {
         response.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
 
-    // Add Connection header
     response.push_str("Connection: close\r\n\r\n");
     response.push_str(body);
     
