@@ -240,11 +240,11 @@ async fn handle_script(
         log_request(method,client_ip, path, 200, "OK");
         send_script_response(stream, 200, "OK", &script_headers, &response_body).await?;
     } else {
-        let error_message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let error_message = "<html>500 Internal Server Error</html>";
         log_request(method,client_ip, path, 500, "Internal Server Error");
         let mut error_headers = HashMap::new();
-        error_headers.insert("Content-Type".to_string(), "text/plain; charset=utf-8".to_string());
-        send_script_response(stream, 500, "Internal Server Error", &error_headers, &error_message).await?;
+        error_headers.insert("Content-Type".to_string(), "text/html; charset=utf-8".to_string());
+        send_script_response(stream, 500, "Internal Server Error", &error_headers, error_message).await?;
     }
 
     Ok(())
